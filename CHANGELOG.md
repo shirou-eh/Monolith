@@ -36,6 +36,33 @@ Discord-bot / single-app workloads.
 
 ### Added
 
+- **mnctl tune** — performance tuning command set that spreads CPU load
+  across every available core and hardware thread. Subcommands:
+  `cpu` (governor + EPP + min-freq + THP + SMT + irqbalance),
+  `io` (per-device elevator + nr_requests + read_ahead_kb),
+  `all`, `status`, and `reset`. Presets: `performance` (default),
+  `balanced` (`schedutil`), and `powersave`. Idempotent and
+  `--dry-run` friendly.
+- **monolith-tune.service** — oneshot systemd unit that runs
+  `mnctl tune all` early at boot so workloads spread across all
+  cores from the first second of uptime. Enabled automatically by
+  `scripts/install.sh`.
+- **`/etc/sysctl.d/99-monolith-cpu.conf`** — scheduler / NUMA / vmstat
+  tunables that bias the kernel toward server-style throughput
+  (autogroup, NUMA balancing on, watchdog cpumask, vm.stat_interval=1,
+  zone_reclaim_mode=0, larger fs.aio-max-nr).
+- **`[performance]` section in `monolith.toml`** — declarative
+  defaults for cpu_governor, energy_performance_preference,
+  apply_on_boot, transparent_hugepages, and per-class I/O elevators.
+- **Cargo `release-perf` profile** — opt-in profile (`cargo build
+  --profile release-perf`) for hosts that prefer absolute runtime
+  speed over the default size-optimised binaries.
+- **Multi-threaded CPU benchmark** — `mnctl bench cpu` now spawns one
+  worker per logical CPU, reports parallel speedup and efficiency,
+  and replaces the previous single-threaded `dd` proxy.
+- **Parallel cargo install** — `scripts/install.sh` now passes
+  `CARGO_BUILD_JOBS=$(nproc)` and `--jobs $(nproc)` explicitly so
+  the local build always saturates every available core.
 - **mnweb** — new workspace crate that ships an embedded single-page web
   management UI. Exposes a JSON API (`/api/overview`, `/api/services`,
   `/api/containers`, `/api/disks`, `/api/cluster`, `/api/templates`,

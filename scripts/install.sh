@@ -321,7 +321,15 @@ install_monolith_tools() {
 
     if [[ -f "${script_dir}/Cargo.toml" ]]; then
         cd "${script_dir}"
-        cargo build --release 2>&1 | tee -a "${LOG_FILE}"
+
+        # Force cargo to fan the build out across every available
+        # core/thread. This is the cargo default but we set it
+        # explicitly so a constrained $MAKEFLAGS or upstream change
+        # can't accidentally serialise the build on multi-core hosts.
+        local jobs
+        jobs="$(nproc)"
+        info "Building Monolith tools with ${jobs} parallel jobs..."
+        CARGO_BUILD_JOBS="${jobs}" cargo build --release --jobs "${jobs}" 2>&1 | tee -a "${LOG_FILE}"
 
         install -Dm755 target/release/mnctl /usr/bin/mnctl
         install -Dm755 target/release/mnpkg /usr/bin/mnpkg
@@ -345,6 +353,16 @@ enable_services() {
     systemctl enable --now docker 2>/dev/null || true
     systemctl enable --now sshd 2>/dev/null || true
     systemctl enable --now nftables 2>/dev/null || true
+
+    # Performance tuning — apply CPU governor / I/O elevator at boot
+    # so every workload runs across all cores from the first second.
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    if [[ -f "${script_dir}/config/systemd/monolith-tune.service" ]]; then
+        cp "${script_dir}/config/systemd/monolith-tune.service" /etc/systemd/system/ 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable --now monolith-tune.service 2>/dev/null || true
+    fi
 
     info "Services enabled"
 }

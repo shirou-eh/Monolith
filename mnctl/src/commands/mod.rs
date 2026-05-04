@@ -17,6 +17,7 @@ pub mod proxy;
 pub mod security;
 pub mod service;
 pub mod template;
+pub mod tune;
 pub mod update;
 pub mod vpn;
 pub mod web;
@@ -110,6 +111,9 @@ enum Commands {
 
     /// Web management UI (mnweb)
     Web(web::WebArgs),
+
+    /// Performance tuning — spread CPU load across all cores and threads
+    Tune(tune::TuneArgs),
 }
 
 impl Cli {
@@ -137,6 +141,7 @@ impl Cli {
             Commands::Notify(args) => args.run().await,
             Commands::Iso(args) => args.run().await,
             Commands::Web(args) => args.run().await,
+            Commands::Tune(args) => args.run().await,
         }
     }
 }
