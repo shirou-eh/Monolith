@@ -1,0 +1,19 @@
+# Monolith OS — AppArmor profile for Valheim dedicated server
+#include <tunables/global>
+
+profile valheim-server flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability setuid,
+  capability setgid,
+  capability sys_nice,
+
+  /opt/valheim/** rmix,
+  /config/** rwk,
+  /tmp/** rw,
+  /home/** rwk,
+
+  network tcp,
+  network udp,
+}

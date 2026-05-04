@@ -1,0 +1,76 @@
+# Monolith OS Configuration
+# https://github.com/shirou-eh/Monolith
+# Version: 1.0.1 "Obsidian"
+
+[system]
+hostname = ""
+timezone = "UTC"
+locale = "en_US.UTF-8"
+# Resource profile: "lite", "full" (default), or "pro". See the README for
+# what each profile enables/disables out of the box.
+profile = "full"
+
+[update]
+auto_update = false
+auto_reboot = false
+schedule = "0 4 * * 0"  # Weekly at 4 AM Sunday
+snapshot_before_update = true
+security_only = false
+
+[backup]
+enabled = true
+schedule = "0 3 * * *"  # Daily at 3 AM
+retention_days = 30
+snapshot_enabled = true
+
+[backup.restic]
+repository = "/mnt/backup"
+password_file = "/etc/monolith/restic-password"
+
+[monitoring]
+enabled = true
+prometheus_port = 9090
+grafana_port = 3000
+node_exporter_port = 9100
+
+[security]
+ssh_port = 2222
+fail2ban_enabled = true
+apparmor_enabled = true
+firewall_enabled = true
+auto_security_updates = true
+
+[network]
+dns_servers = ["1.1.1.1", "1.0.0.1"]
+ipv6_enabled = true
+
+[notifications]
+enabled = false
+webhook_url = ""
+email = ""
+
+[notifications.smtp]
+enabled = false
+host = ""
+port = 587
+user = ""
+password = ""
+password_file = ""  # Alternative to inline password
+security = "starttls"  # "starttls", "tls", or "plain"
+from = ""
+
+[webui]
+enabled = false
+bind = "127.0.0.1:9911"
+read_only = false
+
+[kubernetes]
+enabled = false
+role = "server"  # "server" or "agent"
+channel = "stable"
+disable_traefik = true
+
+[disks]
+smart_check_enabled = true
+smart_check_schedule = "0 6 * * *"  # Daily at 6 AM
+smart_alert_temperature_celsius = 60

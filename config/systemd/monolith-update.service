@@ -1,0 +1,11 @@
+[Unit]
+Description=Monolith OS Automatic Update Check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mnctl update check
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monolith-update

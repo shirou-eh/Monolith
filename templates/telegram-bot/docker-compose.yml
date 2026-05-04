@@ -1,0 +1,32 @@
+# Monolith OS — Telegram bot template (python-telegram-bot v21)
+#
+# Lightweight async bot built on python-telegram-bot. Designed to fit on
+# `mnctl profile lite` (~512 MB RAM hosts).
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: monolith-telegram-bot
+    env_file:
+      - .env
+    volumes:
+      - bot-data:/app/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+
+volumes:
+  bot-data:

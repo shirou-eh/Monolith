@@ -1,0 +1,29 @@
+[package]
+name = "monolith-installer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Monolith OS TUI installer"
+repository.workspace = true
+
+[[bin]]
+name = "monolith-installer"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = { version = "0.28", features = ["crossterm"] }
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+colored = "2"
+indicatif = "0.17"
+dialoguer = "0.11"
+anyhow = "1"
+thiserror = "1"
+nix = { version = "0.29", features = ["process", "fs", "hostname"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+which = "6"

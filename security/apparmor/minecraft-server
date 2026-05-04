@@ -1,0 +1,23 @@
+# Monolith OS — AppArmor profile for Minecraft Java Server
+#include <tunables/global>
+
+/usr/bin/java {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  /usr/bin/java mr,
+  /usr/lib/jvm/** mr,
+  /etc/java*/** r,
+
+  # Server directory
+  owner /opt/minecraft/** rwk,
+  owner /srv/minecraft/** rwk,
+  owner /var/lib/minecraft/** rwk,
+
+  /tmp/** rw,
+
+  network tcp,
+
+  deny /etc/shadow rw,
+  deny /root/** rw,
+}

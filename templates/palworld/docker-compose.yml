@@ -1,0 +1,42 @@
+# Monolith OS — Palworld Dedicated Server Template
+services:
+  palworld:
+    image: thijsvanloef/palworld-server-docker:latest
+    container_name: monolith-palworld
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "8211:8211/udp"
+      - "27015:27015/udp"  # Steam query
+      - "25575:25575/tcp"  # RCON
+    environment:
+      PUID: 1000
+      PGID: 1000
+      PORT: 8211
+      PLAYERS: 16
+      SERVER_PASSWORD: "changeme"
+      ADMIN_PASSWORD: "admin-changeme"
+      SERVER_NAME: "Monolith Palworld"
+      SERVER_DESCRIPTION: "Palworld dedicated server running on Monolith OS"
+      MULTITHREADING: "true"
+      RCON_ENABLED: "true"
+      RCON_PORT: 25575
+      QUERY_PORT: 27015
+      COMMUNITY: "false"
+      TZ: "UTC"
+      UPDATE_ON_BOOT: "true"
+      BACKUP_ENABLED: "true"
+      BACKUP_CRON_EXPRESSION: "0 */6 * * *"
+      DELETE_OLD_BACKUPS: "true"
+      OLD_BACKUP_DAYS: 30
+    volumes:
+      - palworld-data:/palworld
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          memory: 8G
+
+volumes:
+  palworld-data:

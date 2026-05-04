@@ -1,0 +1,10 @@
+[Unit]
+Description=Monolith OS Backup Service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mnctl backup create --tag scheduled
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monolith-backup

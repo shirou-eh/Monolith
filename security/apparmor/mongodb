@@ -1,0 +1,26 @@
+# Monolith OS — AppArmor profile for MongoDB
+#include <tunables/global>
+
+/usr/bin/mongod {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability setuid,
+  capability setgid,
+  capability dac_override,
+  capability fowner,
+  capability chown,
+  capability sys_resource,
+
+  /usr/bin/mongod mr,
+  /etc/mongod.conf r,
+  /etc/mongo*.conf r,
+  /var/lib/mongo*/** rwk,
+  /data/** rwk,
+  /var/log/mongo*/** rw,
+  /run/mongo*/** rw,
+  /tmp/** rw,
+
+  network tcp,
+  network unix,
+}

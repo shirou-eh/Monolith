@@ -1,0 +1,42 @@
+# Monolith OS — Discord bot template (Node.js / discord.js v14)
+#
+# Drops in a minimal discord.js bot with sane production defaults:
+# memory cap, no privileges, non-root user, restart on failure, and an
+# .env file you fill in with the bot token.
+#
+# Deploy with: mnctl template deploy discord-bot-node --name my-bot
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: monolith-discord-bot-node
+    env_file:
+      - .env
+    volumes:
+      - bot-data:/app/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Tuned for `mnctl profile lite` — fits on a 512 MB VPS alongside the
+    # rest of the OS.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 96M
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'process.exit(0)'"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  bot-data:

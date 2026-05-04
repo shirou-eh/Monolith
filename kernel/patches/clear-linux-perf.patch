@@ -1,0 +1,12 @@
+# Monolith OS Kernel Patch Placeholder
+#
+# This patch file is a placeholder for the actual kernel patch.
+# To use real patches, download them from their respective upstream sources:
+#
+# bore-scheduler: https://github.com/firelzrd/bore-scheduler
+# uksm: https://github.com/dolohow/uksm
+# clear-linux-perf: https://github.com/clearlinux-pkgs/linux
+# tcp-brutal: https://github.com/apernet/tcp-brutal
+# bbr3: https://github.com/google/bbr
+#
+# Place the real .patch file here and the kernel build script will apply it.

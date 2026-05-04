@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Monolith OS — Control Panel</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='4' width='20' height='24' rx='3' fill='%2335e0a1'/%3E%3Crect x='10' y='9' width='12' height='2' rx='1' fill='%230a0d12'/%3E%3Crect x='10' y='14' width='8' height='2' rx='1' fill='%230a0d12'/%3E%3Crect x='10' y='19' width='10' height='2' rx='1' fill='%230a0d12'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div class="bg-aurora" aria-hidden="true">
+      <span class="aurora aurora-a"></span>
+      <span class="aurora aurora-b"></span>
+      <span class="aurora aurora-c"></span>
+    </div>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="22" height="22"><rect x="6" y="4" width="20" height="24" rx="3" fill="currentColor"/><rect x="10" y="9" width="12" height="2" rx="1" fill="rgba(0,0,0,0.55)"/><rect x="10" y="14" width="8" height="2" rx="1" fill="rgba(0,0,0,0.55)"/><rect x="10" y="19" width="10" height="2" rx="1" fill="rgba(0,0,0,0.55)"/></svg>
+          </span>
+          <div class="brand-text">
+            <span class="brand-name">Monolith</span>
+            <span class="brand-codename" id="codename">v1.0.1 · Obsidian</span>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary navigation">
+          <a class="nav-item is-active" data-tab="overview" href="#overview">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M3 13h8V3H3v10Zm0 8h8v-6H3v6Zm10 0h8V11h-8v10Zm0-18v6h8V3h-8Z" fill="currentColor"/></svg>
+            <span>Overview</span>
+          </a>
+          <a class="nav-item" data-tab="services" href="#services">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.66.07-.98s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.46 7.46 0 0 0-1.69-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.18.58-1.69.98l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.66-.07.98s.03.66.07.98L2.46 14.63a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .61.22l2.49-1c.51.4 1.08.73 1.69.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.18-.58 1.69-.98l2.49 1a.5.5 0 0 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z" fill="currentColor"/></svg>
+            <span>Services</span>
+          </a>
+          <a class="nav-item" data-tab="containers" href="#containers">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4v10l-9 4-9-4V7Zm9-2.18L5.06 7.6 12 10.6l6.94-3L12 4.82ZM5 9.16v8l6.5 2.89v-8.05L5 9.16Zm14 0L12.5 12v8.05L19 17.16v-8Z" fill="currentColor"/></svg>
+            <span>Containers</span>
+          </a>
+          <a class="nav-item" data-tab="disks" href="#disks">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm0 14a4 4 0 1 1 4-4 4 4 0 0 1-4 4Zm0-6a2 2 0 1 0 2 2 2 2 0 0 0-2-2Z" fill="currentColor"/></svg>
+            <span>Disks</span>
+          </a>
+          <a class="nav-item" data-tab="cluster" href="#cluster">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M5 5a3 3 0 1 1 3 3 3 3 0 0 1-3-3Zm11 0a3 3 0 1 1 3 3 3 3 0 0 1-3-3ZM5 19a3 3 0 1 1 3 3 3 3 0 0 1-3-3Zm11 0a3 3 0 1 1 3 3 3 3 0 0 1-3-3ZM10.5 7.5h3v9h-3v-9ZM7.5 10.5h9v3h-9v-3Z" fill="currentColor"/></svg>
+            <span>Cluster</span>
+          </a>
+          <a class="nav-item" data-tab="templates" href="#templates">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M3 3h8v8H3V3Zm10 0h8v8h-8V3ZM3 13h8v8H3v-8Zm10 0h8v8h-8v-8Z" fill="currentColor"/></svg>
+            <span>Templates</span>
+          </a>
+          <a class="nav-item" data-tab="logs" href="#logs">
+            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M4 4h16v2H4V4Zm0 5h16v2H4V9Zm0 5h10v2H4v-2Zm0 5h7v2H4v-2Z" fill="currentColor"/></svg>
+            <span>Logs</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="health-pill" id="health-pill">
+            <span class="dot dot-good"></span>
+            <span class="health-label">All systems nominal</span>
+          </div>
+          <a class="sidebar-link" href="https://github.com/shirou-eh/Monolith" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.49 11.49 0 0 0 7.86 10.92c.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36a3.05 3.05 0 0 0-1.28-1.69c-1.05-.71.08-.7.08-.7a2.42 2.42 0 0 1 1.77 1.19 2.46 2.46 0 0 0 3.36.96 2.47 2.47 0 0 1 .73-1.54c-2.55-.29-5.24-1.27-5.24-5.66a4.43 4.43 0 0 1 1.18-3.07 4.12 4.12 0 0 1 .11-3.03s.96-.31 3.15 1.17a10.9 10.9 0 0 1 5.74 0c2.19-1.48 3.15-1.17 3.15-1.17a4.12 4.12 0 0 1 .11 3.03 4.42 4.42 0 0 1 1.18 3.07c0 4.4-2.69 5.36-5.25 5.65a2.76 2.76 0 0 1 .79 2.14v3.18c0 .31.21.68.8.56A11.5 11.5 0 0 0 12 .5Z" fill="currentColor"/></svg>
+            <span>Source on GitHub</span>
+          </a>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div class="topbar-left">
+            <h1 class="page-title" id="page-title">Overview</h1>
+            <p class="page-sub" id="page-sub">Live system snapshot · refreshes every 5s</p>
+          </div>
+          <div class="topbar-right">
+            <div class="search">
+              <svg viewBox="0 0 24 24" width="14" height="14"><path d="M10 2a8 8 0 0 1 6.32 12.9l5.39 5.4-1.41 1.41-5.4-5.39A8 8 0 1 1 10 2Zm0 2a6 6 0 1 0 6 6 6 6 0 0 0-6-6Z" fill="currentColor"/></svg>
+              <input type="text" placeholder="Search services, containers, logs…" id="search-input" />
+              <kbd>⌘K</kbd>
+            </div>
+            <div class="user-chip">
+              <span class="avatar">M</span>
+              <span class="user-text">
+                <span class="user-host" id="user-host">monolith.local</span>
+                <span class="user-role">root · console</span>
+              </span>
+            </div>
+          </div>
+        </header>
+
+        <section id="tab-overview" class="tab is-active">
+          <div class="cards-grid">
+            <article class="card card-system">
+              <header class="card-head">
+                <h2>System</h2>
+                <span class="tag tag-good" id="system-tag">online</span>
+              </header>
+              <dl class="kv" id="sysinfo">
+                <dt>Loading…</dt><dd></dd>
+              </dl>
+            </article>
+
+            <article class="card card-cpu">
+              <header class="card-head">
+                <h2>CPU usage</h2>
+                <span class="card-sub" id="cpu-sub">—</span>
+              </header>
+              <div class="metric-big">
+                <span class="metric-value" id="cpu-big">—</span>
+                <span class="metric-unit">%</span>
+              </div>
+              <div class="meter" id="cpu-meter"><span></span></div>
+              <svg class="spark" id="cpu-spark" viewBox="0 0 200 50" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.55"/>
+                    <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                <path class="spark-fill" d="" fill="url(#spark-grad)" />
+                <path class="spark-line" d="" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </article>
+
+            <article class="card card-mem">
+              <header class="card-head">
+                <h2>Memory</h2>
+                <span class="card-sub" id="mem-sub">—</span>
+              </header>
+              <div class="metric-big">
+                <span class="metric-value" id="mem-big">—</span>
+                <span class="metric-unit">%</span>
+              </div>
+              <div class="meter" id="mem-meter"><span></span></div>
+              <p class="caption" id="mem-caption">—</p>
+              <h3>Swap</h3>
+              <div class="meter meter-thin" id="swap-meter"><span></span></div>
+              <p class="caption" id="swap-caption">—</p>
+            </article>
+
+            <article class="card card-uptime">
+              <header class="card-head">
+                <h2>Uptime</h2>
+                <span class="card-sub">since boot</span>
+              </header>
+              <div class="metric-big">
+                <span class="metric-value" id="uptime-big">—</span>
+              </div>
+              <p class="caption" id="hostname-caption">—</p>
+              <div class="load-grid" id="load-grid">
+                <div><span class="load-label">1m</span><span class="load-val" id="load1">—</span></div>
+                <div><span class="load-label">5m</span><span class="load-val" id="load5">—</span></div>
+                <div><span class="load-label">15m</span><span class="load-val" id="load15">—</span></div>
+              </div>
+            </article>
+          </div>
+
+          <article class="card card-wide">
+            <header class="card-head">
+              <h2>Quick glance</h2>
+              <span class="card-sub">A summary of subsystems</span>
+            </header>
+            <div class="quick-grid" id="quick-grid">
+              <div class="quick"><span class="quick-label">Services</span><span class="quick-val" id="qg-services">—</span><span class="quick-sub" id="qg-services-sub">running</span></div>
+              <div class="quick"><span class="quick-label">Containers</span><span class="quick-val" id="qg-containers">—</span><span class="quick-sub" id="qg-containers-sub">active</span></div>
+              <div class="quick"><span class="quick-label">Disks</span><span class="quick-val" id="qg-disks">—</span><span class="quick-sub" id="qg-disks-sub">attached</span></div>
+              <div class="quick"><span class="quick-label">Templates</span><span class="quick-val" id="qg-templates">—</span><span class="quick-sub" id="qg-templates-sub">available</span></div>
+            </div>
+          </article>
+        </section>
+
+        <section id="tab-services" class="tab">
+          <div class="card">
+            <header class="card-head">
+              <h2>Systemd services</h2>
+              <span class="card-sub">Loaded and active units on this host</span>
+            </header>
+            <div class="table-wrap">
+              <table id="services-table">
+                <thead>
+                  <tr><th>Name</th><th>Loaded</th><th>Active</th></tr>
+                </thead>
+                <tbody><tr class="skeleton-row"><td colspan="3"><span class="skeleton"></span></td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-containers" class="tab">
+          <div class="card">
+            <header class="card-head">
+              <h2>Containers</h2>
+              <span class="card-sub">Docker / Podman unified view</span>
+            </header>
+            <div class="table-wrap">
+              <table id="containers-table">
+                <thead>
+                  <tr><th>Name</th><th>Image</th><th>Status</th></tr>
+                </thead>
+                <tbody><tr class="skeleton-row"><td colspan="3"><span class="skeleton"></span></td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-disks" class="tab">
+          <div class="card">
+            <header class="card-head">
+              <h2>Disks &amp; SMART health</h2>
+              <span class="card-sub">Block devices currently mounted</span>
+            </header>
+            <div class="table-wrap">
+              <table id="disks-table">
+                <thead>
+                  <tr><th>Device</th><th>Size</th><th>Mount</th><th>FS</th></tr>
+                </thead>
+                <tbody><tr class="skeleton-row"><td colspan="4"><span class="skeleton"></span></td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-cluster" class="tab">
+          <div class="card">
+            <header class="card-head">
+              <h2>Cluster</h2>
+              <span class="card-sub">Multi-node etcd / k3s configuration</span>
+            </header>
+            <pre id="cluster-info">Loading…</pre>
+          </div>
+        </section>
+
+        <section id="tab-templates" class="tab">
+          <div class="card">
+            <header class="card-head">
+              <h2>Application templates</h2>
+              <span class="card-sub">One-command Docker stacks ready to deploy</span>
+            </header>
+            <div class="template-grid" id="templates-list">
+              <div class="template-skel"></div>
+              <div class="template-skel"></div>
+              <div class="template-skel"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-logs" class="tab">
+          <div class="card">
+            <header class="card-head">
+              <h2>Recent log lines</h2>
+              <span class="card-sub">journalctl tail · most recent first</span>
+            </header>
+            <pre id="logs-pre">Loading…</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <footer class="footer">
+      <span>Monolith OS · Built for the ones who mean it.</span>
+      <span id="version-tag"></span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+# Monolith OS — AppArmor profile for Palworld dedicated server
+#include <tunables/global>
+
+profile palworld-server flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability setuid,
+  capability setgid,
+  capability sys_nice,
+
+  /palworld/** rmix,
+  /home/** rwk,
+  /tmp/** rw,
+
+  network tcp,
+  network udp,
+}

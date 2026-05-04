@@ -1,0 +1,40 @@
+# Monolith OS — PostgreSQL 16 Server Template
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: monolith-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: monolith
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: monolith
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monolith"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Uncomment for pgAdmin web interface
+  # pgadmin:
+  #   image: dpage/pgadmin4
+  #   container_name: monolith-pgadmin
+  #   ports:
+  #     - "5050:80"
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: admin@monolith.local
+  #     PGADMIN_DEFAULT_PASSWORD: changeme
+  #   restart: unless-stopped
+
+volumes:
+  postgres-data:

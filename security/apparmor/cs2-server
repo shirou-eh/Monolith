@@ -1,0 +1,18 @@
+# Monolith OS — AppArmor profile for CS2 Dedicated Server
+#include <tunables/global>
+
+/opt/cs2/** {
+  #include <abstractions/base>
+
+  /opt/cs2/** mrix,
+  /opt/steamcmd/** mr,
+
+  owner /opt/cs2/** rwk,
+
+  network tcp,
+  network udp,
+
+  deny ptrace,
+  deny /etc/shadow rw,
+  deny /root/** rw,
+}

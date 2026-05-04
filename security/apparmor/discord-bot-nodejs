@@ -1,0 +1,22 @@
+# Monolith OS — AppArmor profile for Node.js Discord Bots
+#include <tunables/global>
+
+/usr/bin/node {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/ssl_certs>
+
+  /usr/bin/node mr,
+  /usr/lib/node_modules/** mr,
+
+  owner /opt/discord-bot/** rwk,
+  owner /srv/discord-bot/** rwk,
+  owner /home/*/discord-bot/** rwk,
+
+  /tmp/** rw,
+
+  network tcp,
+
+  deny /etc/shadow rw,
+  deny /root/** rw,
+}

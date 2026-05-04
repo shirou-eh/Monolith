@@ -1,0 +1,34 @@
+[workspace]
+members = ["mnctl", "mnpkg", "installer", "mnweb"]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.1"
+edition = "2021"
+authors = ["Monolith OS Contributors"]
+license = "MIT"
+description = "Monolith OS — Built for the ones who mean it."
+repository = "https://github.com/shirou-eh/Monolith"
+
+# Size-optimised release profile so Monolith ships small enough binaries to
+# run comfortably on low-spec hardware (≤512 MB RAM hosts and small Discord
+# bot VPSes). LTO + a single codegen unit shrinks the final binary by 30-50%
+# at the cost of slower compile times — acceptable for distribution builds.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = false
+incremental = false
+
+# A "fast" profile for developers iterating locally: same release runtime
+# behaviour but skips the expensive size optimisations.
+[profile.release-fast]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = "none"
+panic = "unwind"

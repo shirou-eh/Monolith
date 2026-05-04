@@ -1,0 +1,183 @@
+{
+  "annotations": { "list": [] },
+  "description": "Monolith OS System Overview Dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "System Overview",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "title": "Uptime",
+      "type": "stat",
+      "targets": [{ "expr": "time() - node_boot_time_seconds" }]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "title": "CPU Cores",
+      "type": "stat",
+      "targets": [{ "expr": "count(node_cpu_seconds_total{mode='idle'})" }]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "title": "Total RAM",
+      "type": "stat",
+      "targets": [{ "expr": "node_memory_MemTotal_bytes" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "title": "CPU",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100 } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "title": "CPU Usage",
+      "type": "timeseries",
+      "targets": [{ "expr": "100 - (avg by(instance)(irate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)", "legendFormat": "CPU Usage %" }]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100 } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "title": "CPU Usage by Mode",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "avg by(mode)(irate(node_cpu_seconds_total[5m])) * 100", "legendFormat": "{{ mode }}" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "title": "Memory",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "title": "Memory Usage",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes", "legendFormat": "Used" },
+        { "expr": "node_memory_Cached_bytes", "legendFormat": "Cached" },
+        { "expr": "node_memory_MemAvailable_bytes", "legendFormat": "Available" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "title": "Swap Usage",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes", "legendFormat": "Used Swap" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "title": "Disk",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "thresholds": { "steps": [{"color":"green","value":null},{"color":"yellow","value":80},{"color":"red","value":90}] } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "title": "Disk Usage by Mount",
+      "type": "bargauge",
+      "targets": [{ "expr": "(1 - node_filesystem_avail_bytes{fstype=~'btrfs|ext4|xfs'} / node_filesystem_size_bytes) * 100", "legendFormat": "{{ mountpoint }}" }]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "title": "Disk I/O",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(node_disk_read_bytes_total[5m])", "legendFormat": "Read {{ device }}" },
+        { "expr": "rate(node_disk_written_bytes_total[5m])", "legendFormat": "Write {{ device }}" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "title": "Network",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "title": "Network Traffic",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(node_network_receive_bytes_total{device!='lo'}[5m])", "legendFormat": "RX {{ device }}" },
+        { "expr": "rate(node_network_transmit_bytes_total{device!='lo'}[5m])", "legendFormat": "TX {{ device }}" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "title": "Network Connections",
+      "type": "stat",
+      "targets": [{ "expr": "node_netstat_Tcp_CurrEstab", "legendFormat": "Established TCP" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "title": "Services & Containers",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "title": "Systemd Services",
+      "type": "table",
+      "targets": [{ "expr": "node_systemd_unit_state{state='failed'} == 1", "legendFormat": "{{ name }}", "format": "table" }]
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "title": "Container Count",
+      "type": "stat",
+      "targets": [{ "expr": "count(container_last_seen{name!=''})", "legendFormat": "Running Containers" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "title": "Alerts & Security",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
+      "title": "Active Alerts",
+      "type": "table",
+      "targets": [{ "expr": "ALERTS{alertstate='firing'}", "format": "table" }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["monolith", "system", "overview"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Monolith OS Overview",
+  "uid": "monolith-overview",
+  "version": 1
+}

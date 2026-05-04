@@ -1,0 +1,32 @@
+# Monolith OS — Redis 7 Server Template
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: monolith-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Uncomment for Redis Insight web interface
+  # redis-insight:
+  #   image: redislabs/redisinsight:latest
+  #   container_name: monolith-redis-insight
+  #   ports:
+  #     - "8001:8001"
+  #   restart: unless-stopped
+
+volumes:
+  redis-data:

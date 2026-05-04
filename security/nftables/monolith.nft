@@ -1,0 +1,48 @@
+#!/usr/sbin/nft -f
+# Monolith OS — Default nftables Firewall Configuration
+# Policy: deny by default, allow only explicitly permitted traffic
+
+flush ruleset
+
+table inet monolith {
+    # Connection tracking — stateful firewall
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Allow loopback
+        iif lo accept
+
+        # Drop invalid packets
+        ct state invalid drop
+
+        # Allow established/related connections
+        ct state { established, related } accept
+
+        # ICMP — allow ping (rate-limited)
+        ip protocol icmp icmp type { echo-reply, echo-request, destination-unreachable, time-exceeded } limit rate 10/second accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-reply, echo-request, nd-neighbor-solicit, nd-neighbor-advert, destination-unreachable, time-exceeded } limit rate 10/second accept
+
+        # SSH — port 2222 (Monolith default)
+        tcp dport 2222 accept
+
+        # Drop everything else (logged)
+        limit rate 5/minute log prefix "monolith-drop: " drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Allow forwarding for container networking
+        ct state { established, related } accept
+        iif "docker0" accept
+        oif "docker0" accept
+
+        # Allow forwarding for WireGuard
+        iif "wg*" accept
+        oif "wg*" accept
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

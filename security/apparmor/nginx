@@ -1,0 +1,47 @@
+# Monolith OS — AppArmor profile for nginx
+# /etc/apparmor.d/usr.sbin.nginx
+
+#include <tunables/global>
+
+/usr/sbin/nginx {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability net_bind_service,
+  capability setuid,
+  capability setgid,
+  capability dac_override,
+
+  /usr/sbin/nginx mr,
+  /etc/nginx/** r,
+  /usr/share/nginx/** r,
+  /var/www/** r,
+  /var/log/nginx/** rw,
+  /run/nginx.pid rw,
+  /var/lib/nginx/** rw,
+
+  network tcp,
+  network udp,
+
+  # Child worker processes
+  /usr/sbin/nginx cx -> worker,
+
+  profile worker {
+    #include <abstractions/base>
+    #include <abstractions/nameservice>
+
+    capability net_bind_service,
+    capability setuid,
+    capability setgid,
+
+    /usr/sbin/nginx mr,
+    /etc/nginx/** r,
+    /usr/share/nginx/** r,
+    /var/www/** r,
+    /var/log/nginx/** rw,
+    /run/nginx.pid r,
+
+    network tcp,
+    network udp,
+  }
+}

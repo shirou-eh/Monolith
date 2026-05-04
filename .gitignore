@@ -1,0 +1,32 @@
+# Rust build artifacts
+target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# ISO build outputs
+out/
+artifacts/
+iso-staging/
+work/
+*.iso
+*.iso.sha256
+
+# Release tarballs
+monolith-*.tar.gz
+!templates/**/*.tar.gz
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local secrets / runtime
+.env
+*.local.toml
+*.local.yaml
+node_modules/
+__pycache__/
+*.py[cod]

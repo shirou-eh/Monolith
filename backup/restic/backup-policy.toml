@@ -1,0 +1,49 @@
+# Monolith OS — Restic Backup Policy
+# /etc/monolith/backup.toml
+
+[backup]
+paths = ["/", "/home", "/var/lib/postgresql", "/var/lib/redis"]
+excludes = [
+    "/.snapshots",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/tmp",
+    "/var/tmp",
+    "/var/cache",
+    "/var/lib/docker",
+    "*.log",
+    "*.log.*",
+]
+
+[schedule]
+full_backup = "0 3 * * *"      # Daily at 3 AM
+retention_keep_daily = 7
+retention_keep_weekly = 4
+retention_keep_monthly = 12
+retention_keep_yearly = 3
+
+[destinations]
+
+[[destinations.local]]
+type = "local"
+path = "/mnt/backup"
+enabled = true
+
+[[destinations.remote]]
+type = "sftp"
+host = ""
+path = ""
+enabled = false
+
+[[destinations.s3]]
+type = "s3"
+bucket = ""
+endpoint = ""
+enabled = false
+
+[notifications]
+on_success = true
+on_failure = true
+webhook_url = ""
