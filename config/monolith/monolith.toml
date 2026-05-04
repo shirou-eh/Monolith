@@ -78,3 +78,20 @@ disable_traefik = true
 smart_check_enabled = true
 smart_check_schedule = "0 6 * * *"
 smart_alert_temperature_celsius = 60
+
+# Performance tuning defaults applied by `mnctl tune` and the systemd
+# `monolith-tune.service` unit. These spread CPU load across every
+# core/thread and pick a sensible I/O elevator per device class.
+[performance]
+# CPU governor preset: "performance", "balanced", or "powersave".
+cpu_governor = "performance"
+# Energy/perf hint for Intel/AMD HWP — matches the governor by default.
+energy_performance_preference = "performance"
+# Apply the tuning automatically at every boot.
+apply_on_boot = true
+# Transparent hugepages: "always", "madvise", or "never".
+transparent_hugepages = "madvise"
+# I/O elevator overrides per device class (auto = pick by class).
+io_scheduler_nvme = "none"
+io_scheduler_ssd = "mq-deadline"
+io_scheduler_hdd = "bfq"

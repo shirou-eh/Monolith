@@ -110,6 +110,7 @@ Most distros are general-purpose. Monolith is single-purpose: run servers, run t
 - **Snapshot-safe `mnpkg`** with AUR support, snapper rollback, and CVE auditing.
 - **Quality-of-life fixes:** correct CPU colour bands in the TUI, install gauge always reaches 100% on the Complete screen, throttled web-UI polling (~80% less API chatter).
 - **Hardened ISO build pipeline** that overlays the upstream `archiso` releng baseline so `mkarchiso` always has the boot-loader configs it needs.
+- **Performance tuning** — new `mnctl tune` command + `monolith-tune.service` pin every core to the `performance` governor, set the right I/O elevator per device class, and spread hardware IRQs over all cores so every workload uses the whole CPU from boot.
 
 See the full [CHANGELOG](CHANGELOG.md) for everything else.
 
@@ -560,9 +561,15 @@ mnctl
   notify        test, send, webhook, email, show
   iso           build, doctor, profile-path
   web           run, enable, disable, status, url
+  tune          cpu [--preset performance|balanced|powersave] [--dry-run],
+                io [--dry-run], all [--preset ...], status, reset
 ```
 
 `mnctl --help` and `mnctl <verb> --help` are exhaustive.
+
+`monolith-tune.service` runs `mnctl tune all` at boot, so the default
+install applies the `performance` preset to every CPU core and the
+right elevator to every block device automatically.
 
 ---
 

@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use std::process::Command;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Args)]
 pub struct BenchArgs {
@@ -65,41 +68,92 @@ fn bench_cpu() -> Result<()> {
     println!();
 
     let cpus = num_cpus();
+    const ITERATIONS: u64 = 50_000_000;
 
-    // Single-threaded benchmark
-    print!("  Single-threaded... ");
+    // Single-threaded baseline.
+    print!("  Single-threaded ({ITERATIONS} ops)... ");
     let start = Instant::now();
-    let mut result = 0u64;
-    for i in 0..10_000_000u64 {
-        result = result.wrapping_add(i.wrapping_mul(i));
-    }
-    let single_ms = start.elapsed().as_millis();
+    let single_result = busy_loop(ITERATIONS);
+    let single = start.elapsed();
     // Prevent optimization
-    if result == 0 {
+    if single_result == 0 {
         print!(" ");
     }
-    println!("{} ms", single_ms.to_string().bold());
-
-    // Multi-threaded benchmark using system tool
-    print!("  Multi-threaded ({cpus} cores)... ");
-    let output = Command::new("dd")
-        .args(["if=/dev/zero", "of=/dev/null", "bs=1M", "count=1024"])
-        .output();
-
-    match output {
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let throughput = stderr.lines().last().unwrap_or("completed");
-            println!("{}", throughput.green());
-        }
-        Err(_) => println!("{}", "completed".green()),
-    }
-
+    let single_ms = single.as_millis();
+    let single_ops = ops_per_sec(ITERATIONS, single);
     println!(
-        "  Score: {} (lower is better)",
-        single_ms.to_string().bold()
+        "{} ms — {:.2} Mops/s",
+        single_ms.to_string().bold(),
+        single_ops / 1_000_000.0
+    );
+
+    // Multi-threaded benchmark — saturate every available core/thread
+    // by spawning one worker per logical CPU, each running the same
+    // busy_loop. We sum their results (atomic wrapping_add) to keep
+    // the optimizer honest.
+    print!("  Multi-threaded ({cpus} threads)... ");
+    let total = Arc::new(AtomicU64::new(0));
+    let start = Instant::now();
+    let mut handles = Vec::with_capacity(cpus);
+    for _ in 0..cpus {
+        let total = Arc::clone(&total);
+        handles.push(thread::spawn(move || {
+            let r = busy_loop(ITERATIONS);
+            total.fetch_add(r, Ordering::Relaxed);
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    let multi = start.elapsed();
+    let multi_ms = multi.as_millis();
+    let multi_ops = ops_per_sec(ITERATIONS * cpus as u64, multi);
+    if total.load(Ordering::Relaxed) == 0 {
+        print!(" ");
+    }
+    println!(
+        "{} ms — {:.2} Mops/s",
+        multi_ms.to_string().bold(),
+        multi_ops / 1_000_000.0
+    );
+
+    let speedup = if multi.as_secs_f64() > 0.0 {
+        single.as_secs_f64() * cpus as f64 / multi.as_secs_f64()
+    } else {
+        0.0
+    };
+    let efficiency = if cpus > 0 {
+        speedup / cpus as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!(
+        "  Parallel speedup: {:.2}× across {cpus} threads ({:.1}% efficiency)",
+        speedup, efficiency,
+    );
+    println!(
+        "  Score: {} ms single / {} ms multi (lower is better)",
+        single_ms.to_string().bold(),
+        multi_ms.to_string().bold()
     );
     Ok(())
+}
+
+fn busy_loop(iterations: u64) -> u64 {
+    let mut result = 0u64;
+    for i in 0..iterations {
+        result = result.wrapping_add(i.wrapping_mul(i));
+    }
+    result
+}
+
+fn ops_per_sec(ops: u64, elapsed: Duration) -> f64 {
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 {
+        0.0
+    } else {
+        ops as f64 / secs
+    }
 }
 
 fn bench_memory() -> Result<()> {

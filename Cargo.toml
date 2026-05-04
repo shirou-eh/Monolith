@@ -32,3 +32,24 @@ lto = "thin"
 codegen-units = 16
 strip = "none"
 panic = "unwind"
+
+# A "perf" profile for hosts that have CPU cycles to spare and want
+# the absolute fastest binary at runtime. It keeps single-CU LTO for
+# inlining but bumps opt-level to 3 so hot loops vectorise. Used by
+# `cargo build --profile release-perf` on Pro-tier installs where the
+# ~30% binary-size hit is acceptable.
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# Default dev profile — explicit so incremental rebuilds keep using
+# all cores via the default 256 codegen units. Mirrors cargo's
+# upstream defaults, declared so future profile tweaks don't
+# accidentally serialise the build.
+[profile.dev]
+incremental = true
+codegen-units = 256
