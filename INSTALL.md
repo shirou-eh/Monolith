@@ -1,4 +1,4 @@
-# Monolith OS &mdash; Installation & Day-1 Guide
+# Monolith OS - Installation & Day-1 Guide
 
 > *"From a freshly downloaded ISO to a hardened, monitored, production-shaped server in 20 minutes."*
 
@@ -32,7 +32,7 @@ Go to **[Releases v1.0.1 "Obsidian"](https://github.com/shirou-eh/Monolith/relea
 | [`monolith-1.0.1-full-x86_64.iso`](https://github.com/shirou-eh/Monolith/releases/download/v1.0.1/monolith-1.0.1-full-x86_64.iso) | ~1.25 GB | 2-4 cores / 2-8 GB home server  |
 | [`monolith-1.0.1-pro-x86_64.iso`](https://github.com/shirou-eh/Monolith/releases/download/v1.0.1/monolith-1.0.1-pro-x86_64.iso)   | ~1.25 GB | 4+ cores / 8+ GB cluster node   |
 
-Each ISO ships the same kernel, the same installer, and the same Monolith binaries &mdash; the only difference is the package set on the live medium and the default profile baked into `/etc/monolith/monolith.toml`.
+Each ISO ships the same kernel, the same installer, and the same Monolith binaries - the only difference is the package set on the live medium and the default profile baked into `/etc/monolith/monolith.toml`.
 
 ### 1.2 Verify
 
@@ -41,7 +41,7 @@ sha256sum -c monolith-1.0.1-full-x86_64.iso.sha256
 # expected: monolith-1.0.1-full-x86_64.iso: OK
 ```
 
-If the check fails, **don't write the ISO** &mdash; redownload.
+If the check fails, **don't write the ISO** - redownload.
 
 ### 1.3 Write to USB
 
@@ -57,12 +57,12 @@ sync
 
 **Windows:** [Rufus](https://rufus.ie/) (DD mode) or [Ventoy](https://ventoy.net/).
 
-> `dd` is destructive and silent. Confirm `/dev/sdX` is your stick &mdash; not a system disk.
+> `dd` is destructive and silent. Confirm `/dev/sdX` is your stick - not a system disk.
 
 ### 1.4 Boot the target
 
 1. Plug the USB into the server.
-2. Hit the BIOS one-time-boot key (`F12`, `F11`, `Esc`, `Del` &mdash; vendor-specific).
+2. Hit the BIOS one-time-boot key (`F12`, `F11`, `Esc`, `Del` - vendor-specific).
 3. Pick the USB device. UEFI is preferred, but legacy BIOS works too.
 4. The live system auto-launches `monolith-installer` on `tty1`.
 
@@ -77,14 +77,14 @@ The TUI installer is keyboard-only (`↑/↓/Tab/Enter/Esc`):
 | 3    | Hostname & timezone    | E.g. `hawk.lan`, `Europe/Moscow`.                              |
 | 4    | Root password & user   | Strong root pw + a non-root sudoer; the user joins `monolith`. |
 | 5    | Network                | DHCP (default) or static. Live link state is shown.            |
-| 6    | Profile                | `lite` / `full` / `pro` &mdash; matches the ISO by default.    |
+| 6    | Profile                | `lite` / `full` / `pro` - matches the ISO by default.    |
 | 7    | Security defaults      | Apply firewall + SSH hardening (recommended).                  |
 | 8    | Monitoring             | Opt in to Prometheus + Grafana + Loki (off on `lite`).         |
 | 9    | Confirm                | Last chance to back out.                                       |
 | 10   | Install                | Live progress gauge + log tail.                                |
 | 11   | Reboot                 | Pull the USB on the way down.                                  |
 
-After the reboot you're done with this section &mdash; jump to **§6 First boot**.
+After the reboot you're done with this section - jump to **§6 First boot**.
 
 ---
 
@@ -128,7 +128,7 @@ curl -fsSL https://raw.githubusercontent.com/shirou-eh/Monolith/main/scripts/ins
   | sudo bash -s -- --dry-run
 ```
 
-> The script is idempotent &mdash; re-running it upgrades binaries and touches nothing else.
+> The script is idempotent - re-running it upgrades binaries and touches nothing else.
 
 ---
 
@@ -388,12 +388,12 @@ mnctl info hardware           # confirms the new kernel
 
 ## 8. Where to next?
 
-- The full **[README](README.md)** &mdash; project overview, architecture, command tree, full feature list.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** &mdash; PR workflow, commit style, formatting & lint rules.
-- **[CHANGELOG.md](CHANGELOG.md)** &mdash; what landed in v1.0.1 "Obsidian" and earlier.
-- **[ROADMAP.md](ROADMAP.md)** &mdash; what's next.
-- **[docs/](docs/)** &mdash; multi-language docs (en/ru/zh/es).
+- The full **[README](README.md)** - project overview, architecture, command tree, full feature list.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - PR workflow, commit style, formatting & lint rules.
+- **[CHANGELOG.md](CHANGELOG.md)** - what landed in v1.0.1 "Obsidian" and earlier.
+- **[ROADMAP.md](ROADMAP.md)** - what's next.
+- **[docs/](docs/)** - multi-language docs (en/ru/zh/es).
 
-Got stuck? File an issue &mdash; we read every one.
+Got stuck? File an issue - we read every one.
 
 [![Open an issue](https://img.shields.io/badge/Stuck%3F-Open%20an%20issue-35e0a1?style=for-the-badge&labelColor=0b1220)](https://github.com/shirou-eh/Monolith/issues/new)
