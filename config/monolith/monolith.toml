@@ -24,6 +24,7 @@ enabled = true
 schedule = "0 3 * * *"
 retention_days = 30
 snapshot_enabled = true
+paths = ["/", "/home"]
 
 [backup.restic]
 repository = "/mnt/backup"

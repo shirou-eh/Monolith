@@ -234,11 +234,28 @@ fn export_backup(snapshot_id: &str, dest: &str) -> Result<()> {
 }
 
 struct BackupConfig {
-    paths: Vec<&'static str>,
+    paths: Vec<String>,
 }
 
 fn load_backup_config() -> BackupConfig {
-    BackupConfig {
-        paths: vec!["/", "/home", "/var/lib/postgresql", "/var/lib/redis"],
-    }
+    const CONFIG_PATH: &str = "/etc/monolith/monolith.toml";
+    const DEFAULT_PATHS: &[&str] = &["/", "/home"];
+
+    let paths = std::fs::read_to_string(CONFIG_PATH)
+        .ok()
+        .and_then(|content| content.parse::<toml::Table>().ok())
+        .and_then(|doc| {
+            doc.get("backup")?
+                .as_table()?
+                .get("paths")?
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_else(|| DEFAULT_PATHS.iter().map(|s| s.to_string()).collect());
+
+    BackupConfig { paths }
 }

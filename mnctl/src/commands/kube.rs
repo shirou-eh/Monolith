@@ -161,29 +161,33 @@ fn install(
         channel.bold()
     );
 
-    // We pipe `curl ... | sh -s -` using a sub-shell so we can pass env vars
-    // and avoid bringing in heavyweight Rust HTTP clients for the bootstrap.
     if which::which("curl").is_err() {
         anyhow::bail!("curl is required to install k3s");
     }
 
-    let env_prefix = env_pairs
-        .iter()
-        .map(|(k, v)| format!("{k}={}", shell_escape(v)))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Download the installer script first, then execute it directly
+    // to avoid shell injection through sh -c with interpolated values.
+    let installer = Command::new("curl")
+        .args(["-sfL", "https://get.k3s.io"])
+        .output()
+        .context("failed to download k3s installer script")?;
+    if !installer.status.success() {
+        anyhow::bail!("failed to download k3s installer from https://get.k3s.io");
+    }
 
-    let cmd = format!(
-        "{env_prefix} sh -c 'curl -sfL https://get.k3s.io | sh -s - {role}'",
-        env_prefix = env_prefix,
-        role = role,
-    );
+    let mut cmd = Command::new("sh");
+    cmd.args(["-s", "-", role]);
+    cmd.stdin(std::process::Stdio::piped());
+    for (k, v) in &env_pairs {
+        cmd.env(k, v);
+    }
 
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .status()
-        .context("failed to run k3s installer")?;
+    let mut child = cmd.spawn().context("failed to spawn k3s installer")?;
+    if let Some(ref mut stdin) = child.stdin {
+        use std::io::Write;
+        let _ = stdin.write_all(&installer.stdout);
+    }
+    let status = child.wait().context("failed to wait for k3s installer")?;
     if !status.success() {
         anyhow::bail!("k3s installer exited with non-zero status");
     }
@@ -275,15 +279,4 @@ fn kubeconfig(cat: bool) -> Result<()> {
         println!("{KUBECONFIG_PATH}");
     }
     Ok(())
-}
-
-fn shell_escape(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '.' | ','))
-    {
-        s.to_string()
-    } else {
-        let escaped = s.replace('\'', "'\\''");
-        format!("'{escaped}'")
-    }
 }

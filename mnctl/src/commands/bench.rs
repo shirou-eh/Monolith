@@ -55,7 +55,7 @@ impl BenchArgs {
                 println!();
                 bench_disk("/tmp")?;
                 println!();
-                bench_network("1.1.1.1")?;
+                bench_network("cloudflare.com")?;
                 Ok(())
             }
             BenchCommand::Compare { baseline } => bench_compare(baseline.as_deref()),
@@ -277,16 +277,23 @@ fn bench_network(target: &str) -> Result<()> {
         .unwrap_or("no data");
     println!("{}", rtt.green());
 
-    // Bandwidth test with curl
+    // Bandwidth test with curl — download a 10 MB test payload over HTTPS
     print!("  Download speed... ");
+    let test_url = if target == "1.1.1.1" || target == "cloudflare.com" {
+        "https://speed.cloudflare.com/__down?bytes=10000000".to_string()
+    } else {
+        format!("https://{target}")
+    };
     let output = Command::new("curl")
         .args([
             "-o",
             "/dev/null",
             "-w",
             "%{speed_download}",
-            "-s",
-            &format!("http://{target}"),
+            "-sL",
+            "--max-time",
+            "30",
+            &test_url,
         ])
         .output();
 
