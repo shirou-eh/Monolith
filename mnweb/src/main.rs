@@ -9,8 +9,9 @@
 
 use anyhow::Context;
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::{header, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -37,6 +38,9 @@ struct Args {
     /// Read-only mode (disable any future mutating endpoints)
     #[arg(long, env = "MNWEB_READ_ONLY", default_value_t = false)]
     read_only: bool,
+    /// Bearer token for API authentication (if unset, reads from config or disables auth)
+    #[arg(long, env = "MNWEB_TOKEN")]
+    token: Option<String>,
 }
 
 struct AppState {
@@ -44,6 +48,8 @@ struct AppState {
     /// Reserved for future endpoints that gate behavior on CLI flags.
     #[allow(dead_code)]
     args: Args,
+    /// Resolved auth token (if any)
+    auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -54,15 +60,32 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Resolve token: CLI flag > config file > no auth
+    let auth_token = args.token.clone().or_else(|| {
+        let cfg = std::fs::read_to_string("/etc/monolith/monolith.toml").ok()?;
+        let doc = cfg.parse::<toml::Value>().ok()?;
+        doc.get("webui")
+            .and_then(|w| w.get("token"))
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+    });
+
+    if auth_token.is_some() {
+        tracing::info!("API authentication enabled");
+    } else {
+        tracing::warn!("API authentication disabled — set --token or [webui].token in config");
+    }
+
     let state = Arc::new(AppState {
         sys: Mutex::new(System::new_all()),
         args: args.clone(),
+        auth_token,
     });
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/static/app.css", get(asset_css))
-        .route("/static/app.js", get(asset_js))
+    // API routes protected by auth middleware
+    let api_routes = Router::new()
         .route("/api/overview", get(api_overview))
         .route("/api/services", get(api_services))
         .route("/api/containers", get(api_containers))
@@ -70,7 +93,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/cluster", get(api_cluster))
         .route("/api/templates", get(api_templates))
         .route("/api/logs", get(api_logs))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/static/app.css", get(asset_css))
+        .route("/static/app.js", get(asset_js))
         .route("/healthz", get(healthz))
+        .merge(api_routes)
         .with_state(state);
 
     let addr: SocketAddr = args
@@ -82,6 +115,29 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let Some(ref expected) = state.auth_token else {
+        return next.run(req).await;
+    };
+
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(val) if val.strip_prefix("Bearer ").unwrap_or("") == expected.as_str() => {
+            next.run(req).await
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "unauthorized — provide a valid Bearer token",
+        )
+            .into_response(),
+    }
 }
 
 async fn index() -> Response {

@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::mpsc;
 
 use anyhow::Result;
 use crossterm::{
@@ -8,54 +9,17 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{
-        Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Padding, Paragraph,
-        Wrap,
-    },
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-/// Brand palette for the installer — same emerald + cyan aurora used by
-/// mnweb and mntui so the install experience already feels like Monolith.
-mod palette {
-    use ratatui::style::Color;
-    pub const ACCENT: Color = Color::Rgb(53, 224, 161);
-    pub const ACCENT_2: Color = Color::Rgb(92, 201, 255);
-    pub const TEXT: Color = Color::Rgb(232, 236, 241);
-    pub const MUTE: Color = Color::Rgb(176, 182, 192);
-    pub const DIM: Color = Color::Rgb(125, 132, 143);
-    pub const PANEL: Color = Color::Rgb(30, 35, 45);
-    pub const BG: Color = Color::Rgb(7, 9, 13);
-}
-
-/// ASCII brand mark for the installer welcome / completion screens.
-///
-/// Uses solid block + half-block characters only — these render reliably on
-/// the Linux console TTY where the installer actually runs, and on any
-/// terminal emulator. No box-drawing characters that need pixel-perfect
-/// alignment.
 const MONOLITH_LOGO: &str = r#"
-    █▀▄▀█  █▀█  █▄░█  █▀█  █░░  █  ▀█▀  █░█
-    █░▀░█  █▄█  █░▀█  █▄█  █▄▄  █  ░█░  █▀█
+    ███╗   ███╗ ██████╗ ███╗   ██╗ ██████╗ ██╗     ██╗████████╗██╗  ██╗
+    ████╗ ████║██╔═══██╗████╗  ██║██╔═══██╗██║     ██║╚══██╔══╝██║  ██║
+    ██╔████╔██║██║   ██║██╔██╗ ██║██║   ██║██║     ██║   ██║   ███████║
+    ██║╚██╔╝██║██║   ██║██║╚██╗██║██║   ██║██║     ██║   ██║   ██╔══██║
+    ██║ ╚═╝ ██║╚██████╔╝██║ ╚████║╚██████╔╝███████╗██║   ██║   ██║  ██║
+    ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝
 "#;
-
-/// Build a panel block — rounded border, dim title, soft padding.
-fn panel(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(palette::PANEL))
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(palette::MUTE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .padding(Padding::new(2, 2, 1, 1))
-}
 
 #[derive(Clone, PartialEq)]
 enum Step {
@@ -85,6 +49,8 @@ struct InstallerApp {
     disk_list_state: ListState,
     should_quit: bool,
     install_progress: u16,
+    install_log: Vec<String>,
+    install_started: bool,
 }
 
 impl InstallerApp {
@@ -110,6 +76,8 @@ impl InstallerApp {
             disk_list_state: ListState::default(),
             should_quit: false,
             install_progress: 0,
+            install_log: Vec::new(),
+            install_started: false,
         }
     }
 
@@ -157,12 +125,309 @@ impl InstallerApp {
             Step::Packages => 8,
             Step::Review => 9,
             Step::Installing => 10,
-            // Complete reports one past the last visible step so the
-            // step-progress gauge can reach 100%. The brand bar clamps to
-            // `total` so the user-visible label still reads "10/10".
-            Step::Complete => 11,
+            Step::Complete => 10,
         }
     }
+}
+
+#[allow(dead_code)]
+enum InstallMsg {
+    Progress(u16),
+    Log(String),
+    Done,
+    Error(String),
+}
+
+fn run_install_step(
+    tx: &mpsc::Sender<InstallMsg>,
+    progress: u16,
+    desc: &str,
+    cmd: &str,
+    args: &[&str],
+) -> bool {
+    let _ = tx.send(InstallMsg::Log(desc.to_string()));
+    let _ = tx.send(InstallMsg::Progress(progress));
+    match std::process::Command::new(cmd).args(args).output() {
+        Ok(o) if o.status.success() => {
+            let _ = tx.send(InstallMsg::Log(format!("  [ok] {desc}")));
+            true
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let _ = tx.send(InstallMsg::Log(format!("  [warn] {desc}: {stderr}")));
+            true // non-fatal, continue
+        }
+        Err(e) => {
+            let _ = tx.send(InstallMsg::Log(format!("  [err] {desc}: {e}")));
+            true // still continue, some commands may not be available in all environments
+        }
+    }
+}
+
+struct InstallConfig {
+    disk: String,
+    hostname: String,
+    username: String,
+    timezone: String,
+    use_encryption: bool,
+    keyboard_layout: String,
+    packages: Vec<(String, bool)>,
+}
+
+fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
+    std::thread::spawn(move || {
+        let target_disk = if cfg.disk.is_empty() {
+            "/dev/sda".to_string()
+        } else {
+            let name = cfg.disk.split_whitespace().next().unwrap_or("sda");
+            format!("/dev/{name}")
+        };
+        let hn = if cfg.hostname.is_empty() {
+            "monolith"
+        } else {
+            &cfg.hostname
+        };
+        let user = if cfg.username.is_empty() {
+            "admin"
+        } else {
+            &cfg.username
+        };
+        let timezone = &cfg.timezone;
+        let use_encryption = cfg.use_encryption;
+        let keyboard_layout = &cfg.keyboard_layout;
+        let packages = &cfg.packages;
+
+        // Step 1: Partition disk
+        run_install_step(
+            &tx,
+            5,
+            &format!("Partitioning {target_disk}..."),
+            "sgdisk",
+            &[
+                "-Z",
+                "-n",
+                "1:0:+512M",
+                "-t",
+                "1:ef00",
+                "-n",
+                "2:0:0",
+                "-t",
+                "2:8300",
+                &target_disk,
+            ],
+        );
+
+        // Step 2: Format partitions
+        run_install_step(
+            &tx,
+            15,
+            "Formatting EFI partition...",
+            "mkfs.fat",
+            &["-F32", &format!("{target_disk}1")],
+        );
+        if use_encryption {
+            run_install_step(
+                &tx,
+                18,
+                "Setting up LUKS encryption...",
+                "cryptsetup",
+                &["luksFormat", "--batch-mode", &format!("{target_disk}2")],
+            );
+            run_install_step(
+                &tx,
+                20,
+                "Opening encrypted volume...",
+                "cryptsetup",
+                &["open", &format!("{target_disk}2"), "cryptroot"],
+            );
+            run_install_step(
+                &tx,
+                22,
+                "Formatting root (btrfs)...",
+                "mkfs.btrfs",
+                &["-f", "/dev/mapper/cryptroot"],
+            );
+        } else {
+            run_install_step(
+                &tx,
+                20,
+                "Formatting root (btrfs)...",
+                "mkfs.btrfs",
+                &["-f", &format!("{target_disk}2")],
+            );
+        }
+
+        // Step 3: Mount and create subvolumes
+        let root_dev = if use_encryption {
+            "/dev/mapper/cryptroot".to_string()
+        } else {
+            format!("{target_disk}2")
+        };
+        run_install_step(&tx, 25, "Mounting root...", "mount", &[&root_dev, "/mnt"]);
+        for subvol in &["@", "@home", "@snapshots", "@log", "@cache"] {
+            run_install_step(
+                &tx,
+                28,
+                &format!("Creating subvolume {subvol}..."),
+                "btrfs",
+                &["subvolume", "create", &format!("/mnt/{subvol}")],
+            );
+        }
+
+        // Step 4: Install base system
+        run_install_step(
+            &tx,
+            35,
+            "Installing base system (pacstrap)...",
+            "pacstrap",
+            &[
+                "/mnt",
+                "base",
+                "linux",
+                "linux-firmware",
+                "btrfs-progs",
+                "networkmanager",
+                "sudo",
+                "openssh",
+                "nftables",
+            ],
+        );
+
+        // Step 5: Generate fstab
+        run_install_step(&tx, 55, "Generating fstab...", "genfstab", &["-U", "/mnt"]);
+
+        // Step 6: Set timezone
+        run_install_step(
+            &tx,
+            60,
+            &format!("Setting timezone to {timezone}..."),
+            "arch-chroot",
+            &[
+                "/mnt",
+                "ln",
+                "-sf",
+                &format!("/usr/share/zoneinfo/{timezone}"),
+                "/etc/localtime",
+            ],
+        );
+
+        // Step 7: Set hostname
+        let _ = tx.send(InstallMsg::Log(format!("Setting hostname to {hn}...")));
+        let _ = tx.send(InstallMsg::Progress(65));
+        let _ = std::fs::write("/mnt/etc/hostname", format!("{hn}\n"));
+
+        // Step 8: Set keyboard layout
+        run_install_step(
+            &tx,
+            68,
+            &format!("Setting keyboard layout to {keyboard_layout}..."),
+            "arch-chroot",
+            &["/mnt", "localectl", "set-keymap", keyboard_layout],
+        );
+
+        // Step 9: Create user
+        run_install_step(
+            &tx,
+            72,
+            &format!("Creating user {user}..."),
+            "arch-chroot",
+            &[
+                "/mnt",
+                "useradd",
+                "-m",
+                "-G",
+                "wheel",
+                "-s",
+                "/bin/bash",
+                user,
+            ],
+        );
+
+        // Step 10: Install bootloader
+        run_install_step(
+            &tx,
+            78,
+            "Installing bootloader (systemd-boot)...",
+            "arch-chroot",
+            &["/mnt", "bootctl", "install"],
+        );
+
+        // Step 11: Security hardening
+        run_install_step(
+            &tx,
+            85,
+            "Applying security hardening (SSH, nftables)...",
+            "arch-chroot",
+            &[
+                "/mnt",
+                "systemctl",
+                "enable",
+                "nftables",
+                "sshd",
+                "NetworkManager",
+            ],
+        );
+
+        // Step 12: Install selected packages
+        let selected: Vec<&str> = packages
+            .iter()
+            .filter(|(_, s)| *s)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        if !selected.is_empty() {
+            let _ = tx.send(InstallMsg::Log(format!(
+                "Installing packages: {}",
+                selected.join(", ")
+            )));
+            let _ = tx.send(InstallMsg::Progress(90));
+            // Map friendly names to actual packages
+            for pkg_name in &selected {
+                let pkgs: &[&str] = match *pkg_name {
+                    s if s.contains("Docker") => &["docker", "docker-compose"],
+                    s if s.contains("Monitoring") => &["prometheus", "grafana"],
+                    s if s.contains("Game") => &["lib32-gcc-libs", "screen"],
+                    s if s.contains("Development") => &["git", "vim", "tmux", "base-devel"],
+                    _ => &[],
+                };
+                if !pkgs.is_empty() {
+                    let mut args = vec!["-S", "--noconfirm", "--needed"];
+                    args.extend(pkgs.iter());
+                    run_install_step(
+                        &tx,
+                        92,
+                        &format!("Installing {pkg_name}..."),
+                        "arch-chroot",
+                        &{
+                            let mut full = vec!["/mnt", "pacman"];
+                            full.extend(args);
+                            full
+                        },
+                    );
+                }
+            }
+        }
+
+        // Step 13: Copy Monolith config
+        let _ = tx.send(InstallMsg::Log(
+            "Deploying Monolith configuration...".to_string(),
+        ));
+        let _ = tx.send(InstallMsg::Progress(96));
+        let _ = std::fs::create_dir_all("/mnt/etc/monolith");
+        let _ = std::fs::copy(
+            "/etc/monolith/monolith.toml",
+            "/mnt/etc/monolith/monolith.toml",
+        );
+
+        // Step 14: Finalize
+        let _ = tx.send(InstallMsg::Log("Unmounting filesystems...".to_string()));
+        let _ = tx.send(InstallMsg::Progress(98));
+        let _ = std::process::Command::new("umount")
+            .args(["-R", "/mnt"])
+            .output();
+
+        let _ = tx.send(InstallMsg::Progress(100));
+        let _ = tx.send(InstallMsg::Done);
+    });
 }
 
 fn main() -> Result<()> {
@@ -187,8 +452,25 @@ fn main() -> Result<()> {
             .collect();
     }
 
+    let (tx, rx) = mpsc::channel::<InstallMsg>();
+
     loop {
         terminal.draw(|f| render_ui(f, &mut app))?;
+
+        // Drain install messages
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                InstallMsg::Progress(p) => app.install_progress = p,
+                InstallMsg::Log(line) => app.install_log.push(line),
+                InstallMsg::Done => {
+                    app.install_progress = 100;
+                    app.next_step();
+                }
+                InstallMsg::Error(e) => {
+                    app.install_log.push(format!("[ERROR] {e}"));
+                }
+            }
+        }
 
         if event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
@@ -197,7 +479,29 @@ fn main() -> Result<()> {
                         KeyCode::Char('q') if app.step != Step::Installing => {
                             app.should_quit = true;
                         }
-                        KeyCode::Enter => app.next_step(),
+                        KeyCode::Enter => {
+                            if app.step == Step::Review {
+                                // Start real installation
+                                app.next_step();
+                                if !app.install_started {
+                                    app.install_started = true;
+                                    spawn_installer(
+                                        tx.clone(),
+                                        InstallConfig {
+                                            disk: app.disk.clone(),
+                                            hostname: app.hostname.clone(),
+                                            username: app.username.clone(),
+                                            timezone: app.timezone.clone(),
+                                            use_encryption: app.use_encryption,
+                                            keyboard_layout: app.keyboard_layout.clone(),
+                                            packages: app.packages.clone(),
+                                        },
+                                    );
+                                }
+                            } else {
+                                app.next_step();
+                            }
+                        }
                         KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
                         KeyCode::Down if app.step == Step::DiskSelection => {
                             let i = app.disk_list_state.selected().unwrap_or(0);
@@ -220,13 +524,6 @@ fn main() -> Result<()> {
             }
         }
 
-        if app.step == Step::Installing && app.install_progress < 100 {
-            app.install_progress += 1;
-            if app.install_progress >= 100 {
-                app.next_step();
-            }
-        }
-
         if app.should_quit {
             break;
         }
@@ -239,312 +536,105 @@ fn main() -> Result<()> {
 }
 
 fn render_ui(f: &mut Frame, app: &mut InstallerApp) {
-    // Tinted backdrop matches mnweb/mntui — same product, three surfaces.
-    let backdrop = Block::default().style(Style::default().bg(palette::BG));
-    f.render_widget(backdrop, f.area());
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Header brand line
-            Constraint::Length(3), // Step progress bar
+            Constraint::Length(3), // Header
             Constraint::Min(10),   // Content
-            Constraint::Length(2), // Footer
+            Constraint::Length(3), // Footer
         ])
         .split(f.area());
 
-    render_brand_bar(f, app, chunks[0]);
-    render_step_progress(f, app, chunks[1]);
+    // Header with step indicator
+    let step_text = format!(" Monolith OS Installer  —  Step {}/10", app.step_number());
+    let header = Paragraph::new(step_text)
+        .style(Style::default().fg(Color::Green).bold())
+        .block(Block::default().borders(Borders::BOTTOM));
+    f.render_widget(header, chunks[0]);
 
-    f.render_widget(Clear, chunks[2]);
+    // Content
+    f.render_widget(Clear, chunks[1]);
     match app.step {
-        Step::Welcome => render_welcome(f, chunks[2]),
-        Step::Keyboard => render_keyboard(f, app, chunks[2]),
-        Step::DiskSelection => render_disk_selection(f, app, chunks[2]),
-        Step::Encryption => render_encryption(f, app, chunks[2]),
-        Step::Timezone => render_timezone(f, app, chunks[2]),
-        Step::Network => render_network(f, app, chunks[2]),
-        Step::UserCreation => render_user(f, app, chunks[2]),
-        Step::Packages => render_packages(f, app, chunks[2]),
-        Step::Review => render_review(f, app, chunks[2]),
-        Step::Installing => render_installing(f, app, chunks[2]),
-        Step::Complete => render_complete(f, chunks[2]),
+        Step::Welcome => render_welcome(f, chunks[1]),
+        Step::Keyboard => render_keyboard(f, app, chunks[1]),
+        Step::DiskSelection => render_disk_selection(f, app, chunks[1]),
+        Step::Encryption => render_encryption(f, app, chunks[1]),
+        Step::Timezone => render_timezone(f, app, chunks[1]),
+        Step::Network => render_network(f, app, chunks[1]),
+        Step::UserCreation => render_user(f, app, chunks[1]),
+        Step::Packages => render_packages(f, app, chunks[1]),
+        Step::Review => render_review(f, app, chunks[1]),
+        Step::Installing => render_installing(f, app, chunks[1]),
+        Step::Complete => render_complete(f, chunks[1]),
     }
 
-    render_footer(f, app, chunks[3]);
-}
-
-fn step_label(step: &Step) -> &'static str {
-    match step {
-        Step::Welcome => "Welcome",
-        Step::Keyboard => "Keyboard",
-        Step::DiskSelection => "Disk",
-        Step::Encryption => "Encryption",
-        Step::Timezone => "Timezone",
-        Step::Network => "Network",
-        Step::UserCreation => "User",
-        Step::Packages => "Packages",
-        Step::Review => "Review",
-        Step::Installing => "Install",
-        Step::Complete => "Done",
-    }
-}
-
-fn render_brand_bar(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(40)])
-        .split(area);
-
-    let brand = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " ▮ ",
-            Style::default()
-                .fg(palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "MONOLITH",
-            Style::default()
-                .fg(palette::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled("installer", Style::default().fg(palette::DIM)),
-        Span::raw("  "),
-        Span::styled(
-            format!("v{}", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(palette::ACCENT_2),
-        ),
-    ]));
-    f.render_widget(brand, columns[0]);
-
-    let total = 10u8;
-    let n = app.step_number().min(total);
-    let stage = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!("{} ", step_label(&app.step)),
-            Style::default()
-                .fg(palette::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("· step {n}/{total} "),
-            Style::default().fg(palette::DIM),
-        ),
-    ]))
-    .alignment(Alignment::Right);
-    f.render_widget(stage, columns[1]);
-}
-
-fn render_step_progress(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let total = 10u16;
-    let n = app.step_number() as u16;
-    // Steps complete when you LEAVE them, so progress is (n - 1) / total.
-    // Complete returns 11 → bar reaches 100 % on the success screen.
-    let pct: u16 = (n.saturating_sub(1) * 100 / total).min(100);
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(palette::PANEL))
-                .padding(Padding::new(1, 1, 0, 0)),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(palette::ACCENT)
-                .bg(Color::Rgb(20, 24, 32)),
-        )
-        .percent(pct)
-        .label(format!("{} of {}", n.min(total), total));
-    f.render_widget(gauge, area);
-}
-
-fn render_footer(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let spans: Vec<Span> = if app.step == Step::Complete {
-        vec![
-            Span::styled(
-                " ⏎ ",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("reboot   ", Style::default().fg(palette::DIM)),
-            Span::styled(
-                "q ",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("quit", Style::default().fg(palette::DIM)),
-        ]
+    // Footer
+    let footer_text = if app.step == Step::Complete {
+        " Press Enter to reboot  |  q to quit"
     } else if app.step == Step::Installing {
-        vec![
-            Span::styled(" ● ", Style::default().fg(palette::ACCENT)),
-            Span::styled(
-                "installation in progress…",
-                Style::default().fg(palette::MUTE),
-            ),
-        ]
+        " Installation in progress..."
     } else {
-        vec![
-            Span::styled(
-                " ⏎ ",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("continue   ", Style::default().fg(palette::DIM)),
-            Span::styled(
-                "⌫/esc ",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("back   ", Style::default().fg(palette::DIM)),
-            Span::styled(
-                "q ",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("quit", Style::default().fg(palette::DIM)),
-        ]
+        " Enter: Next  |  Esc: Back  |  q: Quit"
     };
-    let footer = Paragraph::new(Line::from(spans)).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(palette::PANEL)),
-    );
-    f.render_widget(footer, area);
+    let footer = Paragraph::new(footer_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .block(Block::default().borders(Borders::TOP));
+    f.render_widget(footer, chunks[2]);
 }
 
 fn render_welcome(f: &mut Frame, area: Rect) {
-    let lines: Vec<Line> = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            MONOLITH_LOGO,
-            Style::default()
-                .fg(palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("v{} ", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(palette::ACCENT_2),
-            ),
-            Span::styled(
-                "Obsidian",
-                Style::default()
-                    .fg(palette::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " — Built for the ones who mean it.",
-                Style::default().fg(palette::DIM),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "    System requirements",
-            Style::default().fg(palette::MUTE),
-        )),
-        Line::from(Span::styled(
-            "      · CPU      x86_64 or ARM64",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(Span::styled(
-            "      · RAM      2 GB minimum (8 GB recommended)",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(Span::styled(
-            "      · Disk     20 GB minimum (100 GB recommended)",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "    Press Enter to begin.",
-            Style::default()
-                .fg(palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Welcome"))
+    let text = format!(
+        "{}\n\n    v{} \"Obsidian\"\n    Built for the ones who mean it.\n\n\
+         \n    System Requirements:\n    \
+         - CPU: x86_64 or ARM64\n    \
+         - RAM: 2 GB minimum (8 GB recommended)\n    \
+         - Disk: 20 GB minimum (100 GB recommended)\n\n    \
+         Press Enter to begin installation...",
+        MONOLITH_LOGO,
+        env!("CARGO_PKG_VERSION")
+    );
+    let widget = Paragraph::new(text)
+        .style(Style::default().fg(Color::Green))
+        .block(Block::default().borders(Borders::ALL).title(" Welcome "))
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 }
 
 fn render_keyboard(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let lines = vec![
-        kv_line("Selected layout", &app.keyboard_layout),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Common layouts: us · uk · de · fr · es · ru · jp",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "Press Enter",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" to continue with '{}'.", app.keyboard_layout),
-                Style::default().fg(palette::MUTE),
-            ),
-        ]),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Keyboard layout"))
-        .wrap(Wrap { trim: false });
+    let text = format!(
+        "\n  Selected keyboard layout: {}\n\n  \
+         Common layouts: us, uk, de, fr, es, ru, jp\n\n  \
+         Press Enter to continue with '{}' layout",
+        app.keyboard_layout, app.keyboard_layout
+    );
+    let widget = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Keyboard Layout "),
+    );
     f.render_widget(widget, area);
 }
 
-fn kv_line<'a>(key: &'a str, value: &'a str) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(format!("{key:<16}"), Style::default().fg(palette::DIM)),
-        Span::styled(
-            value.to_string(),
-            Style::default()
-                .fg(palette::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
 fn render_disk_selection(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
-    let items: Vec<ListItem> = if app.disk_list.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "No block devices detected. Boot from removable media to attach disks.",
-            Style::default().fg(palette::DIM),
-        )))]
-    } else {
-        app.disk_list
-            .iter()
-            .map(|d| {
-                ListItem::new(Line::from(Span::styled(
-                    d.clone(),
-                    Style::default().fg(palette::TEXT),
-                )))
-            })
-            .collect()
-    };
+    let items: Vec<ListItem> = app
+        .disk_list
+        .iter()
+        .map(|d| ListItem::new(format!("  {d}")))
+        .collect();
 
     if app.disk_list_state.selected().is_none() && !app.disk_list.is_empty() {
         app.disk_list_state.select(Some(0));
     }
 
     let list = List::new(items)
-        .block(panel("Select installation disk"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Installation Disk (Up/Down to select, Enter to confirm) "),
+        )
         .highlight_style(
             Style::default()
-                .fg(palette::ACCENT)
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -552,99 +642,66 @@ fn render_disk_selection(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
 }
 
 fn render_encryption(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let (mark_color, mark) = if app.use_encryption {
-        (palette::ACCENT, "[x]")
-    } else {
-        (palette::DIM, "[ ]")
-    };
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{mark} "),
-                Style::default().fg(mark_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Enable LUKS2 full-disk encryption",
-                Style::default()
-                    .fg(palette::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Encryption adds tamper-resistance but requires entering a password at every boot.",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "Space",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" toggle   ", Style::default().fg(palette::DIM)),
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" continue", Style::default().fg(palette::DIM)),
-        ]),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Encryption"))
-        .wrap(Wrap { trim: false });
+    let status = if app.use_encryption { "[x]" } else { "[ ]" };
+    let text = format!(
+        "\n  {status} Enable LUKS2 full-disk encryption\n\n  \
+         Press Space to toggle, Enter to continue\n\n  \
+         Note: Encryption adds security but requires entering\n  \
+         a password at every boot."
+    );
+    let widget =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Encryption "));
     f.render_widget(widget, area);
 }
 
 fn render_timezone(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let lines = vec![
-        kv_line("Selected", &app.timezone),
-        Line::from(""),
-        Line::from(Span::styled(
-            "You can change this later with `mnctl config set timezone <Region/City>`.",
-            Style::default().fg(palette::DIM),
-        )),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Timezone"))
-        .wrap(Wrap { trim: false });
+    let text = format!(
+        "\n  Selected timezone: {}\n\n  \
+         Press Enter to continue",
+        app.timezone
+    );
+    let widget =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Timezone "));
     f.render_widget(widget, area);
 }
 
 fn render_network(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let host = if app.hostname.is_empty() {
-        "monolith"
-    } else {
-        &app.hostname
-    };
-    let lines = vec![
-        kv_line("Hostname", host),
-        kv_line("Network", "DHCP (automatic)"),
-        kv_line("DNS", "1.1.1.1 · 1.0.0.1"),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Network configuration"))
-        .wrap(Wrap { trim: false });
+    let text = format!(
+        "\n  Hostname: {}\n\n  \
+         Network: DHCP (automatic)\n  \
+         DNS: 1.1.1.1, 1.0.0.1\n\n  \
+         Press Enter to continue",
+        if app.hostname.is_empty() {
+            "monolith"
+        } else {
+            &app.hostname
+        }
+    );
+    let widget = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Network Configuration "),
+    );
     f.render_widget(widget, area);
 }
 
 fn render_user(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let user = if app.username.is_empty() {
-        "admin"
-    } else {
-        &app.username
-    };
-    let lines = vec![
-        kv_line("Username", user),
-        kv_line("Root login", "disabled (recommended)"),
-        kv_line("SSH", "key-based authentication, port 2222"),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("User creation"))
-        .wrap(Wrap { trim: false });
+    let text = format!(
+        "\n  Username: {}\n\n  \
+         Root login: disabled (recommended)\n  \
+         SSH: key-based authentication\n\n  \
+         Press Enter to continue",
+        if app.username.is_empty() {
+            "admin"
+        } else {
+            &app.username
+        }
+    );
+    let widget = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" User Creation "),
+    );
     f.render_widget(widget, area);
 }
 
@@ -653,22 +710,16 @@ fn render_packages(f: &mut Frame, app: &InstallerApp, area: Rect) {
         .packages
         .iter()
         .map(|(name, selected)| {
-            let (color, mark) = if *selected {
-                (palette::ACCENT, "[x]")
-            } else {
-                (palette::DIM, "[ ]")
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{mark} "),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(name.clone(), Style::default().fg(palette::TEXT)),
-            ]))
+            let checkbox = if *selected { "[x]" } else { "[ ]" };
+            ListItem::new(format!("  {checkbox} {name}"))
         })
         .collect();
 
-    let list = List::new(items).block(panel("Additional packages — Space to toggle"));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Additional Packages (Space to toggle) "),
+    );
     f.render_widget(list, area);
 }
 
@@ -680,185 +731,114 @@ fn render_review(f: &mut Frame, app: &InstallerApp, area: Rect) {
         .map(|(n, _)| n.as_str())
         .collect();
 
-    let pkgs = if selected_pkgs.is_empty() {
-        "none".to_string()
-    } else {
-        selected_pkgs.join(" · ")
-    };
-
-    let lines = vec![
-        kv_line("Keyboard", &app.keyboard_layout),
-        kv_line(
-            "Disk",
-            if app.disk.is_empty() {
-                "auto"
-            } else {
-                &app.disk
-            },
-        ),
-        kv_line(
-            "Encryption",
-            if app.use_encryption { "LUKS2" } else { "none" },
-        ),
-        kv_line("Timezone", &app.timezone),
-        kv_line(
-            "Hostname",
-            if app.hostname.is_empty() {
-                "monolith"
-            } else {
-                &app.hostname
-            },
-        ),
-        kv_line(
-            "Username",
-            if app.username.is_empty() {
-                "admin"
-            } else {
-                &app.username
-            },
-        ),
-        kv_line("Packages", &pkgs),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "Press Enter",
-                Style::default()
-                    .fg(palette::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " to begin installation. Esc to go back.",
-                Style::default().fg(palette::DIM),
-            ),
-        ]),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Review & install"))
+    let text = format!(
+        "\n  Installation Summary\n  \
+         ═══════════════════════\n\n  \
+         Keyboard:   {}\n  \
+         Disk:       {}\n  \
+         Encryption: {}\n  \
+         Timezone:   {}\n  \
+         Hostname:   {}\n  \
+         Username:   {}\n  \
+         Packages:   {}\n\n  \
+         Press Enter to begin installation...",
+        app.keyboard_layout,
+        if app.disk.is_empty() {
+            "auto"
+        } else {
+            &app.disk
+        },
+        if app.use_encryption { "LUKS2" } else { "none" },
+        app.timezone,
+        if app.hostname.is_empty() {
+            "monolith"
+        } else {
+            &app.hostname
+        },
+        if app.username.is_empty() {
+            "admin"
+        } else {
+            &app.username
+        },
+        selected_pkgs.join(", "),
+    );
+    let widget = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Review & Install "),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 }
 
 fn render_installing(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let steps = [
-        "Partitioning disk",
-        "Formatting partitions",
-        "Installing base system",
-        "Installing Monolith packages",
-        "Installing kernel",
-        "Configuring system",
-        "Setting up bootloader",
-        "Applying security hardening",
-        "Configuring monitoring",
-        "Finalizing",
-    ];
-
-    // Length(5) leaves 1 row of inner content height after the rounded
-    // border (2 rows) and panel()'s vertical padding (2 rows). With Length(3)
-    // ratatui clamped the gauge's inner area to zero and the bar disappeared.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(3)])
+        .constraints([Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    let pct: u16 = app.install_progress.min(100);
-    let progress = Gauge::default()
-        .block(panel("Installing Monolith OS"))
-        .gauge_style(
-            Style::default()
-                .fg(palette::ACCENT)
-                .bg(Color::Rgb(20, 24, 32)),
+    // Progress bar
+    let gauge = ratatui::widgets::Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Installing Monolith OS "),
         )
-        .percent(pct)
-        .label(format!("{pct}%"));
-    f.render_widget(progress, chunks[0]);
+        .gauge_style(Style::default().fg(Color::Green))
+        .percent(app.install_progress)
+        .label(format!("{}%", app.install_progress));
+    f.render_widget(gauge, chunks[0]);
 
-    let current_step = (app.install_progress as usize / 10).min(steps.len() - 1);
-    let mut lines: Vec<Line> = Vec::with_capacity(steps.len());
-    for (i, step) in steps.iter().enumerate() {
-        let (icon, icon_color, text_color) = if i < current_step {
-            ("✔", palette::ACCENT, palette::MUTE)
-        } else if i == current_step {
-            ("●", palette::ACCENT_2, palette::TEXT)
-        } else {
-            ("○", palette::DIM, palette::DIM)
-        };
-        lines.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                format!("{icon} "),
-                Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(step.to_string(), Style::default().fg(text_color)),
-        ]));
-    }
-    let stages = Paragraph::new(lines)
-        .block(panel("Stages"))
-        .wrap(Wrap { trim: false });
-    f.render_widget(stages, chunks[1]);
+    // Log output (show last N lines that fit)
+    let visible_lines = chunks[1].height.saturating_sub(2) as usize;
+    let start = app.install_log.len().saturating_sub(visible_lines);
+    let items: Vec<ListItem> = app.install_log[start..]
+        .iter()
+        .map(|line| {
+            let style = if line.contains("[ok]") {
+                Style::default().fg(Color::Green)
+            } else if line.contains("[err]") || line.contains("[ERROR]") {
+                Style::default().fg(Color::Red)
+            } else if line.contains("[warn]") {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!(" {line}")).style(style)
+        })
+        .collect();
+
+    let log_list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Installation Log "),
+    );
+    f.render_widget(log_list, chunks[1]);
 }
 
 fn render_complete(f: &mut Frame, area: Rect) {
-    let lines: Vec<Line> = vec![
-        Line::from(Span::styled(
-            MONOLITH_LOGO,
-            Style::default()
-                .fg(palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                "Installation complete.",
-                Style::default()
-                    .fg(palette::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("Monolith OS v{} · Obsidian", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(palette::ACCENT_2),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "    Remove installation media and press Enter to reboot.",
-            Style::default().fg(palette::MUTE),
-        )),
-        Line::from(Span::styled(
-            "    Then connect via SSH on port 2222:",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(Span::styled(
-            "      ssh admin@<server-ip> -p 2222",
-            Style::default().fg(palette::ACCENT),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "    First steps",
-            Style::default().fg(palette::MUTE),
-        )),
-        Line::from(Span::styled(
-            "      mnctl info system        — system overview",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(Span::styled(
-            "      mnctl monitor status     — live resource usage",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(Span::styled(
-            "      mnctl security audit     — security check",
-            Style::default().fg(palette::DIM),
-        )),
-        Line::from(Span::styled(
-            "      mnctl template list      — application templates",
-            Style::default().fg(palette::DIM),
-        )),
-    ];
-    let widget = Paragraph::new(lines)
-        .block(panel("Installation complete"))
+    let text = format!(
+        "{}\n\n    Installation complete!\n\n    \
+         Monolith OS v{} \"Obsidian\" has been installed.\n\n    \
+         Remove installation media and press Enter to reboot.\n\n    \
+         After reboot, connect via SSH on port 2222:\n    \
+         ssh admin@<server-ip> -p 2222\n\n    \
+         First steps:\n    \
+         - mnctl info system          # Check system info\n    \
+         - mnctl monitor status       # View system status\n    \
+         - mnctl security audit       # Run security audit\n    \
+         - mnctl template list        # Browse application templates",
+        MONOLITH_LOGO,
+        env!("CARGO_PKG_VERSION")
+    );
+    let widget = Paragraph::new(text)
+        .style(Style::default().fg(Color::Green))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Installation Complete "),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 }

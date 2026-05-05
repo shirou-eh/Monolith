@@ -60,51 +60,47 @@ fn set_config(key: &str, value: &str) -> Result<()> {
         .unwrap_or(std::path::Path::new("/etc/monolith"));
     std::fs::create_dir_all(config_dir).context("failed to create config directory")?;
 
-    let mut content = if std::path::Path::new(CONFIG_PATH).exists() {
+    let content = if std::path::Path::new(CONFIG_PATH).exists() {
         std::fs::read_to_string(CONFIG_PATH).context("failed to read config")?
     } else {
         String::from("# Monolith OS Configuration\n# https://github.com/shirou-eh/Monolith\n\n")
     };
 
-    // Parse key path and update or add the value
+    let mut doc = content
+        .parse::<toml::Table>()
+        .context("failed to parse config as TOML")?;
+
+    // Navigate dot-separated key path (e.g. "backup.restic.repository")
     let parts: Vec<&str> = key.split('.').collect();
-    let toml_key = parts.last().unwrap_or(&key);
-    let section = if parts.len() > 1 {
-        Some(parts[..parts.len() - 1].join("."))
+
+    // Auto-detect value type: bool, integer, or string
+    let toml_val = if value == "true" {
+        toml::Value::Boolean(true)
+    } else if value == "false" {
+        toml::Value::Boolean(false)
+    } else if let Ok(n) = value.parse::<i64>() {
+        toml::Value::Integer(n)
     } else {
-        None
+        toml::Value::String(value.to_string())
     };
 
-    // Simple key-value update/add
-    let line = format!("{toml_key} = \"{value}\"\n");
-
-    if let Some(ref sect) = section {
-        let section_header = format!("[{sect}]");
-        if content.contains(&section_header) {
-            // Find existing key in section and replace, or add to section
-            let key_pattern = format!("{toml_key} = ");
-            if content.contains(&key_pattern) {
-                let mut new_content = String::new();
-                for l in content.lines() {
-                    if l.trim_start().starts_with(&key_pattern) {
-                        new_content.push_str(&line);
-                    } else {
-                        new_content.push_str(l);
-                        new_content.push('\n');
-                    }
-                }
-                content = new_content;
-            } else {
-                content = content.replace(&section_header, &format!("{section_header}\n{line}"));
-            }
-        } else {
-            content.push_str(&format!("\n{section_header}\n{line}"));
-        }
+    if parts.len() == 1 {
+        doc.insert(parts[0].to_string(), toml_val);
     } else {
-        content.push_str(&line);
+        // Walk/create nested tables
+        let mut table = &mut doc;
+        for &section in &parts[..parts.len() - 1] {
+            table = table
+                .entry(section)
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .with_context(|| format!("key '{section}' exists but is not a table"))?;
+        }
+        table.insert(parts[parts.len() - 1].to_string(), toml_val);
     }
 
-    std::fs::write(CONFIG_PATH, &content).context("failed to write config")?;
+    let serialized = toml::to_string_pretty(&doc).context("failed to serialize config")?;
+    std::fs::write(CONFIG_PATH, &serialized).context("failed to write config")?;
     println!("{} Set {} = {}", "●".green(), key.bold(), value);
     Ok(())
 }

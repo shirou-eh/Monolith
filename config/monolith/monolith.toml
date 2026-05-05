@@ -67,6 +67,8 @@ from = ""
 enabled = false
 bind = "127.0.0.1:9911"
 read_only = false
+# Bearer token for API authentication. Leave empty to disable auth (not recommended).
+token = ""
 
 [kubernetes]
 enabled = false

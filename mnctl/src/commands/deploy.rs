@@ -19,8 +19,8 @@ enum DeployCommand {
         /// Service name
         #[arg(long)]
         name: String,
-        /// Exposed port
-        #[arg(long)]
+        /// Exposed port (default: 8080)
+        #[arg(long, default_value_t = 8080)]
         port: u16,
         /// Environment variables (KEY=VALUE)
         #[arg(long, short)]
@@ -188,7 +188,7 @@ fn deploy_app(
     if let Some(d) = domain {
         println!("{} Configuring reverse proxy for {}...", "→".blue(), d);
         let upstream = format!("http://127.0.0.1:{port}");
-        super::proxy::add_proxy_rule(d, &upstream)?;
+        super::proxy::add_proxy_rule(d, &upstream, None)?;
     }
 
     println!(

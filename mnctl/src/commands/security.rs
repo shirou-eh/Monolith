@@ -258,12 +258,20 @@ fn firewall_allow(port: &str) -> Result<()> {
         anyhow::bail!("unknown port or service: {port}");
     }
 
-    let rule = format!(
-        "add rule inet monolith input tcp dport {port_num} accept comment \"mnctl-managed\""
-    );
-
     let status = Command::new("nft")
-        .arg(&rule)
+        .args([
+            "add",
+            "rule",
+            "inet",
+            "monolith",
+            "input",
+            "tcp",
+            "dport",
+            &port_num.to_string(),
+            "accept",
+            "comment",
+            "\"mnctl-managed\"",
+        ])
         .status()
         .with_context(|| format!("failed to add firewall rule for port {port_num}"))?;
 
@@ -287,10 +295,20 @@ fn firewall_deny(port: &str) -> Result<()> {
         anyhow::bail!("invalid port: {port}");
     }
 
-    let rule =
-        format!("add rule inet monolith input tcp dport {port_num} drop comment \"mnctl-managed\"");
     let status = Command::new("nft")
-        .arg(&rule)
+        .args([
+            "add",
+            "rule",
+            "inet",
+            "monolith",
+            "input",
+            "tcp",
+            "dport",
+            &port_num.to_string(),
+            "drop",
+            "comment",
+            "\"mnctl-managed\"",
+        ])
         .status()
         .with_context(|| format!("failed to add deny rule for port {port_num}"))?;
 
