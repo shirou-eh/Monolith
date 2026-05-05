@@ -19,6 +19,9 @@ enum ProxyCommand {
         domain: String,
         /// Upstream server (e.g., http://127.0.0.1:3000)
         upstream: String,
+        /// Email for Let's Encrypt certificate registration
+        #[arg(long)]
+        email: Option<String>,
     },
     /// Remove a proxy rule
     Remove {
@@ -52,7 +55,11 @@ impl ProxyArgs {
     pub async fn run(self) -> Result<()> {
         match self.command {
             ProxyCommand::List => list_proxies(),
-            ProxyCommand::Add { domain, upstream } => add_proxy_rule(&domain, &upstream),
+            ProxyCommand::Add {
+                domain,
+                upstream,
+                email,
+            } => add_proxy_rule(&domain, &upstream, email.as_deref()),
             ProxyCommand::Remove { domain } => remove_proxy_rule(&domain),
             ProxyCommand::Ssl(args) => match args.command {
                 SslCommand::Renew { domain } => ssl_renew(domain.as_deref()),
@@ -98,7 +105,7 @@ fn list_proxies() -> Result<()> {
     Ok(())
 }
 
-pub fn add_proxy_rule(domain: &str, upstream: &str) -> Result<()> {
+pub fn add_proxy_rule(domain: &str, upstream: &str, email: Option<&str>) -> Result<()> {
     let sites_dir = "/etc/nginx/sites-available";
     let enabled_dir = "/etc/nginx/sites-enabled";
     std::fs::create_dir_all(sites_dir).context("failed to create nginx sites directory")?;
@@ -166,32 +173,61 @@ server {{
     }
     std::os::unix::fs::symlink(&config_path, &enabled_path).context("failed to create symlink")?;
 
-    // Obtain TLS certificate
-    println!("{} Obtaining TLS certificate for {}...", "→".blue(), domain);
-    let certbot_result = Command::new("certbot")
-        .args([
-            "certonly",
-            "--webroot",
-            "-w",
-            "/var/www/certbot",
-            "-d",
-            domain,
-            "--non-interactive",
-            "--agree-tos",
-            "--email",
-            "admin@localhost",
-        ])
-        .status();
-
-    match certbot_result {
-        Ok(s) if s.success() => {
-            println!("  {} TLS certificate obtained", "●".green());
+    // Resolve certbot email: --email flag > config > error
+    let certbot_email = match email {
+        Some(e) => e.to_string(),
+        None => {
+            let config_path = "/etc/monolith/monolith.toml";
+            std::fs::read_to_string(config_path)
+                .ok()
+                .and_then(|content| content.parse::<toml::Value>().ok())
+                .and_then(|v| {
+                    v.get("notifications")
+                        .and_then(|n| n.get("email"))
+                        .and_then(|e| e.as_str())
+                        .filter(|e| !e.is_empty())
+                        .map(|e| e.to_string())
+                })
+                .unwrap_or_default()
         }
-        _ => {
-            println!(
-                "  {} Certificate not obtained — configure manually or run certbot",
-                "●".yellow()
-            );
+    };
+
+    if certbot_email.is_empty() {
+        println!(
+            "  {} No email configured for Let's Encrypt. Set [notifications].email in /etc/monolith/monolith.toml or pass --email",
+            "●".yellow(),
+        );
+        println!(
+            "  {} Skipping TLS certificate — configure email and run: certbot certonly --webroot -w /var/www/certbot -d {domain}",
+            "●".yellow()
+        );
+    } else {
+        println!("{} Obtaining TLS certificate for {}...", "→".blue(), domain);
+        let certbot_result = Command::new("certbot")
+            .args([
+                "certonly",
+                "--webroot",
+                "-w",
+                "/var/www/certbot",
+                "-d",
+                domain,
+                "--non-interactive",
+                "--agree-tos",
+                "--email",
+                &certbot_email,
+            ])
+            .status();
+
+        match certbot_result {
+            Ok(s) if s.success() => {
+                println!("  {} TLS certificate obtained", "●".green());
+            }
+            _ => {
+                println!(
+                    "  {} Certificate not obtained — configure manually or run certbot",
+                    "●".yellow()
+                );
+            }
         }
     }
 

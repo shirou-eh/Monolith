@@ -63,16 +63,40 @@ impl ClusterArgs {
 }
 
 fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let mut buf = [0u8; 24];
+    let f = std::fs::File::open("/dev/urandom");
+    match f {
+        Ok(mut f) => {
+            use std::io::Read;
+            if f.read_exact(&mut buf).is_err() {
+                // Fallback: fill from system time + pid (still better than pure timestamp)
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                for (i, b) in buf.iter_mut().enumerate() {
+                    *b = ((ts >> (i % 16 * 8)) & 0xff) as u8 ^ (std::process::id() as u8);
+                }
+            }
+        }
+        Err(_) => {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = ((ts >> (i % 16 * 8)) & 0xff) as u8 ^ (std::process::id() as u8);
+            }
+        }
+    }
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
     format!(
-        "mnlth-{:x}-{:x}-{:x}",
-        ts,
-        ts.wrapping_mul(31),
-        ts.wrapping_mul(97)
+        "mnlth-{}-{}-{}",
+        to_hex(&buf[..8]),
+        to_hex(&buf[8..16]),
+        to_hex(&buf[16..24]),
     )
 }
 

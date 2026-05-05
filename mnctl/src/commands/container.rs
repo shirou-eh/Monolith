@@ -282,6 +282,7 @@ fn prune_containers() -> Result<()> {
 }
 
 fn compose_action(action: &str, path: &str) -> Result<()> {
+    let runtime = docker_cmd();
     let mut args = vec!["-f", path];
     match action {
         "up" => args.extend(["up", "-d"]),
@@ -289,7 +290,7 @@ fn compose_action(action: &str, path: &str) -> Result<()> {
         _ => args.push(action),
     }
 
-    let status = Command::new("docker")
+    let status = Command::new(&runtime)
         .arg("compose")
         .args(&args)
         .status()
@@ -309,7 +310,8 @@ fn compose_action(action: &str, path: &str) -> Result<()> {
 }
 
 fn compose_logs(path: &str) -> Result<()> {
-    let status = Command::new("docker")
+    let runtime = docker_cmd();
+    let status = Command::new(&runtime)
         .args(["compose", "-f", path, "logs", "-f"])
         .status()
         .with_context(|| format!("failed to get compose logs for {path}"))?;
