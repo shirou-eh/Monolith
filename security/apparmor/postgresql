@@ -1,0 +1,24 @@
+# Monolith OS — AppArmor profile for PostgreSQL
+#include <tunables/global>
+
+/usr/bin/postgres {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability setuid,
+  capability setgid,
+  capability dac_override,
+  capability fowner,
+  capability chown,
+
+  /usr/bin/postgres mr,
+  /usr/lib/postgresql/** mr,
+  /var/lib/postgresql/** rwk,
+  /etc/postgresql/** r,
+  /var/log/postgresql/** rw,
+  /run/postgresql/** rw,
+  /tmp/** rw,
+
+  network tcp,
+  network unix,
+}

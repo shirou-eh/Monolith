@@ -1,0 +1,155 @@
+# Monolith OS — Alert Rules
+# Production-quality alerting for server workloads
+
+groups:
+  - name: system
+    interval: 30s
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 90% for 5 minutes (current: {{ $value }}%)"
+
+      - alert: CriticalCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 95% for 10 minutes"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is above 85% (current: {{ $value }}%)"
+
+      - alert: CriticalMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical memory usage on {{ $labels.instance }}"
+
+      - alert: LowDiskSpace
+        expr: (1 - (node_filesystem_avail_bytes{fstype=~"btrfs|ext4|xfs"} / node_filesystem_size_bytes)) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.mountpoint }}"
+          description: "Disk usage above 80% (current: {{ $value }}%)"
+
+      - alert: CriticalDiskSpace
+        expr: (1 - (node_filesystem_avail_bytes{fstype=~"btrfs|ext4|xfs"} / node_filesystem_size_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space on {{ $labels.mountpoint }}"
+
+      - alert: EmergencyDiskSpace
+        expr: (1 - (node_filesystem_avail_bytes{fstype=~"btrfs|ext4|xfs"} / node_filesystem_size_bytes)) * 100 > 95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EMERGENCY: Disk nearly full on {{ $labels.mountpoint }}"
+
+      - alert: HighDiskIO
+        expr: rate(node_disk_io_time_seconds_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk I/O wait on {{ $labels.device }}"
+
+      - alert: HighLoadAverage
+        expr: node_load15 > count(node_cpu_seconds_total{mode="idle"}) by (instance) * 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High load average on {{ $labels.instance }}"
+
+      - alert: SystemdServiceFailed
+        expr: node_systemd_unit_state{state="failed"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.name }} failed on {{ $labels.instance }}"
+
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter down on {{ $labels.instance }}"
+
+      - alert: KernelOOMKiller
+        expr: increase(node_vmstat_oom_kill[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "OOM killer invoked on {{ $labels.instance }}"
+
+  - name: security
+    interval: 30s
+    rules:
+      - alert: HighFailedLoginAttempts
+        expr: increase(node_systemd_journal_entries_total{priority="4",syslog_identifier="sshd"}[5m]) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of failed SSH logins"
+
+      - alert: SSHRootLogin
+        expr: increase(node_systemd_journal_entries_total{priority="6",syslog_identifier="sshd",message=~".*root.*"}[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Root login attempt detected"
+
+  - name: application
+    interval: 30s
+    rules:
+      - alert: ContainerDown
+        expr: absent(container_last_seen{name!=""}) or (time() - container_last_seen{name!=""}) > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container {{ $labels.name }} is down"
+
+      - alert: ContainerHighMemory
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} using >90% of memory limit"
+
+      - alert: CertificateExpirySoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 30
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expires in {{ $value }} days"
+
+      - alert: CertificateExpiryUrgent
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 7
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS certificate expires in {{ $value }} days — URGENT"

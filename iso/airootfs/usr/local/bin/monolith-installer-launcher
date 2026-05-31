@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Wrapper that finds the bundled monolith-installer binary and execs it.
+set -euo pipefail
+
+if command -v monolith-installer >/dev/null 2>&1; then
+    exec monolith-installer "$@"
+fi
+
+if [[ -x /usr/local/lib/monolith/monolith-installer ]]; then
+    exec /usr/local/lib/monolith/monolith-installer "$@"
+fi
+
+echo "monolith-installer not found on this image." >&2
+echo "Did the ISO build vendor the release binary?" >&2
+exit 1

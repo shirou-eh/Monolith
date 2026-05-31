@@ -1,0 +1,35 @@
+services:
+  factorio:
+    image: factoriotools/factorio:stable
+    container_name: monolith-factorio
+    ports:
+      - "34197:34197/udp"
+      - "27015:27015/tcp"
+    environment:
+      SAVE_NAME: ${SAVE_NAME:-factory}
+      GENERATE_NEW_SAVE: ${GENERATE_NEW_SAVE:-true}
+      SAVE_INTERVAL: ${SAVE_INTERVAL:-5}
+      LOAD_LATEST_SAVE: ${LOAD_LATEST_SAVE:-true}
+      UPDATE_MODS_ON_START: ${UPDATE_MODS_ON_START:-true}
+      MAX_PLAYERS: ${MAX_PLAYERS:-20}
+      GAME_SETTINGS: ${GAME_SETTINGS:-}
+      MAP_SETTINGS: ${MAP_SETTINGS:-}
+      SERVER_SETTINGS: ${SERVER_SETTINGS:-}
+    volumes:
+      - factorio-data:/factorio
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "bash", "-c", "ss -tln | grep :34197"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  factorio-data:

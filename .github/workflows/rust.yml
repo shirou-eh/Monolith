@@ -1,0 +1,77 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - "devin/**"
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, nightly]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        if: matrix.rust == 'stable'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --all
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        run: |
+          find . -name '*.sh' -type f | xargs shellcheck -S warning
+
+  validate-configs:
+    name: Validate Configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate YAML
+        run: |
+          sudo apt-get install -y python3-yaml
+          find . -name '*.yml' -o -name '*.yaml' | while read -r f; do
+            echo "Validating $f"
+            python3 -c "import yaml; yaml.safe_load(open('$f'))"
+          done
+
+      - name: Validate TOML
+        run: |
+          pip install toml
+          find . -name '*.toml' | while read -r f; do
+            echo "Validating $f"
+            python3 -c "import toml; toml.load('$f')"
+          done

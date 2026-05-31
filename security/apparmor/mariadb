@@ -1,0 +1,25 @@
+# Monolith OS — AppArmor profile for MariaDB
+#include <tunables/global>
+
+/usr/sbin/mariadbd {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability setuid,
+  capability setgid,
+  capability dac_override,
+  capability fowner,
+  capability chown,
+  capability sys_resource,
+
+  /usr/sbin/mariadbd mr,
+  /usr/lib/mariadb/** mr,
+  /etc/mysql/** r,
+  /var/lib/mysql/** rwk,
+  /var/log/mysql/** rw,
+  /run/mysqld/** rw,
+  /tmp/** rw,
+
+  network tcp,
+  network unix,
+}

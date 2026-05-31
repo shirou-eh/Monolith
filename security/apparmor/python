@@ -1,0 +1,26 @@
+# Monolith OS — AppArmor profile for Python applications
+#include <tunables/global>
+
+/usr/bin/python3* {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/python>
+
+  /usr/bin/python3* mr,
+  /usr/lib/python3*/** mr,
+
+  owner /opt/**/  r,
+  owner /opt/**   rwk,
+  owner /home/**/  r,
+  owner /home/**   rwk,
+
+  /tmp/** rw,
+  /var/tmp/** rw,
+
+  network tcp,
+  network udp,
+
+  deny /etc/shadow rw,
+  deny /etc/passwd w,
+  deny /root/** rw,
+}

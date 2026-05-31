@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Allow building ISOs on demand without cutting a release.
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "ISO tier to build (lite, full, pro, all)"
+        required: false
+        default: "all"
+
+permissions:
+  contents: write
+
+jobs:
+  # Stage 1 — build the rust binaries for both architectures and ship a
+  # tarball that the ISO job vendors into airootfs/usr/local/bin/.
+  binaries:
+    name: Binaries (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir -p release
+          for bin in mnctl mnpkg mntui mnweb monolith-installer; do
+            cp "target/${{ matrix.target }}/release/${bin}" "release/${bin}-${{ matrix.target }}" 2>/dev/null || true
+          done
+          tar czf "monolith-${{ matrix.target }}.tar.gz" -C release .
+
+      - name: Upload binary tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: monolith-${{ matrix.target }}
+          path: monolith-${{ matrix.target }}.tar.gz
+
+  # Stage 2 — build the three ISO tiers (lite / full / pro) on an Arch
+  # Linux container so mkarchiso is available. Each ISO embeds the
+  # matching `[system].profile` into /etc/monolith/monolith.toml so
+  # `mnctl profile show` on first boot reports the same tier the user
+  # downloaded.
+  iso:
+    name: ISO (${{ matrix.tier }})
+    needs: binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [lite, full, pro]
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            archiso \
+            grub edk2-shell \
+            libisoburn squashfs-tools dosfstools mtools \
+            git bash sed grep coreutils tar findutils
+
+      - uses: actions/checkout@v4
+
+      - name: Download x86_64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: monolith-x86_64-unknown-linux-gnu
+          path: dist
+
+      - name: Stage release tarball for the ISO
+        run: |
+          mkdir -p iso-staging
+          tar -xzf dist/monolith-x86_64-unknown-linux-gnu.tar.gz -C iso-staging
+          # Rename to bare names so /usr/local/bin/mnctl etc. land
+          # without the target-triple suffix.
+          for src in iso-staging/*-x86_64-unknown-linux-gnu; do
+            [[ -f "${src}" ]] || continue
+            mv "${src}" "iso-staging/$(basename "${src}" -x86_64-unknown-linux-gnu)"
+          done
+          tar -czf monolith-bin.tar.gz -C iso-staging .
+
+      - name: Resolve version string
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF#refs/tags/v}"
+          else
+            ver="$(date +%Y.%m.%d)-dev"
+          fi
+          echo "version=${ver}" >> "${GITHUB_OUTPUT}"
+          echo "Building ISO version: ${ver}"
+
+      - name: Build ISO (${{ matrix.tier }})
+        run: |
+          mkdir -p out
+          chmod +x iso/build-iso.sh
+          # We are already root inside the Arch container, so disable
+          # sudo. mkarchiso runs unprivileged builds by chrooting itself.
+          ./iso/build-iso.sh \
+            --tier "${{ matrix.tier }}" \
+            --out out \
+            --release-tar monolith-bin.tar.gz \
+            --version "${{ steps.ver.outputs.version }}"
+
+      - name: Rename and checksum the ISO
+        run: |
+          shopt -s nullglob
+          for src in out/*.iso; do
+            base="monolith-${{ steps.ver.outputs.version }}-${{ matrix.tier }}-x86_64.iso"
+            mv "${src}" "out/${base}"
+            (cd out && sha256sum "${base}" > "${base}.sha256")
+          done
+          ls -lh out
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: monolith-iso-${{ matrix.tier }}
+          path: |
+            out/*.iso
+            out/*.sha256
+
+  # Stage 3 — only when a real tag was pushed, gather every artifact
+  # and publish a GitHub Release with auto-generated notes.
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, iso]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List collected artifacts
+        run: find artifacts -type f -printf '%p (%s bytes)\n' | sort
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.iso
+            artifacts/**/*.sha256
+          body: |
+            Monolith OS — built for the ones who mean it.
+
+            ### Resource tiers
+
+            Each ISO embeds a different default `[system].profile` so
+            `mnctl profile show` on first boot matches what you
+            downloaded.
+
+            | Tier  | Target hardware                        | Default services       |
+            |-------|----------------------------------------|------------------------|
+            | lite  | ≥1 vCPU / ≥512 MB (Discord-bot VPSes)  | core only              |
+            | full  | ≥2 cores / ≥2 GB (home server)         | + monitoring + SMART   |
+            | pro   | ≥4 cores / ≥8 GB (production / k3s)    | + mnweb + everything   |
+
+            Binary tarballs (`monolith-<arch>.tar.gz`) ship the raw
+            CLIs (`mnctl`, `mnpkg`, `mntui`, `mnweb`,
+            `monolith-installer`) for installs on top of an existing
+            Arch system.
+
+            Verify ISOs with the matching `*.sha256` file:
+
+            ```
+            sha256sum -c monolith-<version>-<tier>-x86_64.iso.sha256
+            ```

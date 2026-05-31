@@ -1,0 +1,40 @@
+# Monolith OS — mnweb AppArmor profile
+# Confines mnweb to:
+#   - read /etc/monolith/monolith.toml and /etc/monolith/token only
+#   - bind 127.0.0.1:9911 (configurable)
+#   - read from journald via AF_UNIX for /api/logs
+#   - no outbound network, no writes outside /tmp/mnweb-*
+
+abi <abi/4.0>,
+include <tunables/global>
+
+/usr/local/bin/mnweb flags=(attach_disconnected) {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+
+  # Config read
+  /etc/monolith/monolith.toml       r,
+  /etc/monolith/token               r,
+
+  # Binary & libraries
+  /usr/local/bin/mnweb              mr,
+  /usr/lib/**                       mr,
+
+  # Bind port (loopback only)
+  network inet tcp,
+  network inet6 tcp,
+
+  # Journald communication (AF_UNIX)
+  /run/systemd/journal/socket       rw,
+  /run/systemd/journal/stdout       rw,
+
+  # Temp files for export / cache
+  /tmp/mnweb-*/                     rw,
+
+  # Deny everything else
+  deny network inet tcp -> 0.0.0.0/0,
+  deny network inet6 tcp -> ::/0,
+  deny /etc/ssh/**                  r,
+  deny /root/**                     r,
+  deny /home/**                     r,
+}

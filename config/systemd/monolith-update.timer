@@ -1,0 +1,9 @@
+[Unit]
+Description=Monolith OS Weekly Update Check Timer
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

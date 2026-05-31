@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Monolith OS — first-boot helper executed after running the installer.
+# Lives inside the ISO airootfs; copied verbatim to the installed system.
+set -euo pipefail
+
+echo "Monolith OS first-boot configuration"
+
+# Enable Docker, SSH, NetworkManager, fail2ban (when present)
+for svc in docker sshd NetworkManager fail2ban systemd-timesyncd; do
+    if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+        systemctl enable "${svc}.service" || true
+    fi
+done
+
+# Sync clock once.
+if command -v chronyd >/dev/null 2>&1; then
+    chronyd -q 'pool 2.arch.pool.ntp.org iburst' 2>/dev/null || true
+fi
+
+# Ensure /etc/monolith exists with the default config if missing.
+if [[ ! -f /etc/monolith/monolith.toml ]]; then
+    install -d -m 0755 /etc/monolith
+    if [[ -f /usr/share/monolith/monolith.toml ]]; then
+        cp /usr/share/monolith/monolith.toml /etc/monolith/monolith.toml
+    fi
+fi
+
+echo "Monolith OS first-boot complete."

@@ -1,0 +1,36 @@
+# Monolith OS — Valheim Dedicated Server Template
+services:
+  valheim:
+    image: lloesche/valheim-server:latest
+    container_name: monolith-valheim
+    cap_add:
+      - SYS_NICE
+    ports:
+      - "2456-2458:2456-2458/udp"
+      - "9001:9001/tcp"  # Status HTTP
+    environment:
+      SERVER_NAME: "Monolith Valheim"
+      WORLD_NAME: "Monolith"
+      SERVER_PASS: "changeme"
+      SERVER_PUBLIC: "true"
+      UPDATE_CRON: "0 1 * * *"
+      BACKUPS_CRON: "0 */2 * * *"
+      BACKUPS_DIRECTORY: "/config/backups"
+      BACKUPS_MAX_AGE: "14"
+      STATUS_HTTP: "true"
+      STATUS_HTTP_PORT: "9001"
+    volumes:
+      - valheim-config:/config
+      - valheim-data:/opt/valheim
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    stop_grace_period: 2m
+
+volumes:
+  valheim-config:
+  valheim-data:

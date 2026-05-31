@@ -1,0 +1,13 @@
+[Unit]
+Description=Monolith OS Monitoring Stack
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose -f /etc/monolith/services/monitoring-compose.yml up -d
+ExecStop=/usr/bin/docker compose -f /etc/monolith/services/monitoring-compose.yml down
+
+[Install]
+WantedBy=multi-user.target

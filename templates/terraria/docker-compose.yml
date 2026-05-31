@@ -1,0 +1,33 @@
+services:
+  terraria:
+    image: ryshe/terraria:latest
+    container_name: monolith-terraria
+    ports:
+      - "7777:7777"
+      - "7878:7878"
+    environment:
+      WORLD_NAME: ${WORLD_NAME:-Terraria}
+      WORLD_SIZE: ${WORLD_SIZE:-large}
+      DIFFICULTY: ${DIFFICULTY:-normal}
+      MAX_PLAYERS: ${MAX_PLAYERS:-16}
+      MOTD: ${MOTD:-Welcome to Monolith Terraria}
+      NPC_STREAM: ${NPC_STREAM:-60}
+      AUTOCREATE: ${AUTOCREATE:-1}
+      PASSWORD: ${PASSWORD:-}
+      SEED: ${SEED:-}
+      ENABLE_TSHOCK_API: ${ENABLE_TSHOCK_API:-true}
+      TSCHOCK_API_PORT: ${TSCHOCK_API_PORT:-7878}
+    volumes:
+      - terraria-worlds:/world
+      - terraria-config:/config
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+volumes:
+  terraria-worlds:
+  terraria-config:

@@ -1,0 +1,27 @@
+# Monolith OS — AppArmor profile for Node.js applications
+#include <tunables/global>
+
+/usr/bin/node {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  /usr/bin/node mr,
+  /usr/lib/node_modules/** mr,
+  /usr/local/lib/node_modules/** mr,
+
+  # Application directory (parameterized via tunables)
+  owner /opt/**/  r,
+  owner /opt/**   rwk,
+  owner /home/**/  r,
+  owner /home/**   rwk,
+
+  /tmp/** rw,
+  /var/tmp/** rw,
+
+  network tcp,
+  network udp,
+
+  deny /etc/shadow rw,
+  deny /etc/passwd w,
+  deny /root/** rw,
+}

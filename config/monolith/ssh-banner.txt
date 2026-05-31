@@ -1,0 +1,9 @@
+
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    MONOLITH OS                          ║
+    ║            Built for the ones who mean it.              ║
+    ╚══════════════════════════════════════════════════════════╝
+
+    WARNING: Unauthorized access is prohibited.
+    All connections are logged and monitored.
+

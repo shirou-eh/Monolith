@@ -1,0 +1,21 @@
+[Unit]
+Description=Monolith OS web management UI (mnweb)
+Documentation=https://github.com/shirou-eh/Monolith
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/mnweb --bind 127.0.0.1:9911
+Restart=on-failure
+RestartSec=3
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log /run /var/lib/monolith
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

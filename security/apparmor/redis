@@ -1,0 +1,15 @@
+# Monolith OS — AppArmor profile for Redis
+#include <tunables/global>
+
+/usr/bin/redis-server {
+  #include <abstractions/base>
+
+  /usr/bin/redis-server mr,
+  /var/lib/redis/** rwk,
+  /etc/redis/** r,
+  /var/log/redis/** rw,
+  /run/redis/** rw,
+
+  network tcp,
+  network unix,
+}

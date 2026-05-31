@@ -1,0 +1,65 @@
+# Monolith OS — packages installed in the live/install ISO image (x86_64)
+# Keep this list lean: the live ISO is meant for installing, not full use.
+
+# --- Base ---
+base
+base-devel
+linux
+linux-firmware
+mkinitcpio
+syslinux
+grub
+efibootmgr
+edk2-shell
+arch-install-scripts
+btrfs-progs
+xfsprogs
+e2fsprogs
+dosfstools
+parted
+gptfdisk
+lvm2
+cryptsetup
+mdadm
+sudo
+which
+nano
+vim
+git
+curl
+wget
+htop
+iotop
+iproute2
+iputils
+openssh
+networkmanager
+dhcpcd
+wpa_supplicant
+chrony
+zsh
+bash-completion
+
+# --- Filesystems / archives ---
+unzip
+zip
+tar
+zstd
+
+# --- Hardware support ---
+amd-ucode
+intel-ucode
+nvme-cli
+smartmontools
+usbutils
+pciutils
+dmidecode
+lshw
+
+# --- Container/runtime base (so first boot is useful) ---
+docker
+docker-compose
+
+# --- Monolith control surfaces ---
+# These are not in the official Arch repos; the ISO builder vendors the
+# release tarball into airootfs/usr/local/bin/.

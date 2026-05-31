@@ -1,0 +1,23 @@
+# Monolith OS — AppArmor profile for Python Discord Bots
+#include <tunables/global>
+
+/usr/bin/python3* {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/python>
+  #include <abstractions/ssl_certs>
+
+  /usr/bin/python3* mr,
+  /usr/lib/python3*/** mr,
+
+  owner /opt/discord-bot/** rwk,
+  owner /srv/discord-bot/** rwk,
+  owner /home/*/discord-bot/** rwk,
+
+  /tmp/** rw,
+
+  network tcp,
+
+  deny /etc/shadow rw,
+  deny /root/** rw,
+}

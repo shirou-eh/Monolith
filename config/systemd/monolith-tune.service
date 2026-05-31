@@ -1,0 +1,17 @@
+[Unit]
+Description=Monolith OS performance tuning (CPU + I/O across all cores)
+Documentation=https://github.com/shiro-rase/monolith
+DefaultDependencies=no
+After=local-fs.target sysinit.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mnctl tune all
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monolith-tune
+
+[Install]
+WantedBy=multi-user.target

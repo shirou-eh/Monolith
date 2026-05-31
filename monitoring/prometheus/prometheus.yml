@@ -1,0 +1,61 @@
+# Monolith OS — Prometheus Configuration
+# /etc/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+rule_files:
+  - "rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "localhost:9093"
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Node Exporter — system metrics
+  - job_name: "node"
+    static_configs:
+      - targets: ["localhost:9100"]
+
+  # cAdvisor — container metrics
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["localhost:8080"]
+
+  # Monolith custom metrics
+  - job_name: "monolith"
+    static_configs:
+      - targets: ["localhost:9999"]
+
+  # nginx exporter (if running)
+  - job_name: "nginx"
+    static_configs:
+      - targets: ["localhost:9113"]
+
+  # PostgreSQL exporter (if running)
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["localhost:9187"]
+
+  # Redis exporter (if running)
+  - job_name: "redis"
+    static_configs:
+      - targets: ["localhost:9121"]
+
+# Remote write (uncomment for scaling)
+# remote_write:
+#   - url: "http://remote-prometheus:9090/api/v1/write"
+
+storage:
+  tsdb:
+    retention.time: 90d
+    retention.size: 10GB
