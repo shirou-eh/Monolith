@@ -152,6 +152,15 @@ if [[ -n "${RELEASE_TAR}" ]]; then
     echo "[*] Vendoring ${RELEASE_TAR} into airootfs/usr/local/bin"
     install -d "${PROFILE_WORK}/airootfs/usr/local/bin"
     tar -C "${PROFILE_WORK}/airootfs/usr/local/bin" -xzf "${RELEASE_TAR}"
+else
+    # The motd tells whoever boots this to run `monolith-installer` —
+    # without --release-tar that command falls back to a placeholder
+    # script that just explains why it's missing, instead of quietly
+    # producing an ISO that can't do the one thing its own banner
+    # promises. Loud on purpose: this was previously silent and the
+    # gap only ever surfaced by someone actually booting the image.
+    echo "[!] No --release-tar given — monolith-installer will NOT be usable on this image." >&2
+    echo "    The ISO will still boot; base pacstrap/arch-chroot install still works." >&2
 fi
 
 mkdir -p "${OUT_DIR}"

@@ -31,13 +31,13 @@ Yb, `88'  `88'  `88                                          IP'`Yb         I8  
 /// stays "arch" so anything checking compatibility (AUR helpers, some
 /// pacman hooks) keeps working unmodified.
 const MONOLITH_OS_RELEASE: &str = r#"NAME="Monolith OS"
-PRETTY_NAME="Monolith OS 1.3.0 (Slate)"
+PRETTY_NAME="Monolith OS 1.4.0 (Diorite)"
 ID=monolith
 ID_LIKE=arch
-BUILD_ID=1.3.0
-VERSION="1.3.0 (Slate)"
-VERSION_ID=1.3.0
-VERSION_CODENAME=slate
+BUILD_ID=1.4.0
+VERSION="1.4.0 (Diorite)"
+VERSION_ID=1.4.0
+VERSION_CODENAME=diorite
 ANSI_COLOR="38;2;80;200;120"
 LOGO=monolith
 HOME_URL="https://shirou-eh.github.io/Monolith-website/"

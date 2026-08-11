@@ -28,5 +28,5 @@ file_permissions=(
     ["/root"]="0:0:750"
     ["/root/.automated_script.sh"]="0:0:755"
     ["/usr/local/bin/monolith-firstboot"]="0:0:755"
-    ["/usr/local/bin/monolith-installer-launcher"]="0:0:755"
+    ["/usr/local/bin/monolith-installer"]="0:0:755"
 )

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Placeholder for `monolith-installer` on a live image built WITHOUT
+# --release-tar. A normal `mnctl iso build --release-tar <tarball>` run
+# extracts the real binary straight into /usr/local/bin, overwriting this
+# script at the exact same path — so if you're reading this, that step
+# was skipped, and there's a real fix (rebuild with --release-tar) rather
+# than a workaround to run here.
+set -euo pipefail
+
+if [[ -x /usr/local/lib/monolith/monolith-installer ]]; then
+    exec /usr/local/lib/monolith/monolith-installer "$@"
+fi
+
+echo "monolith-installer isn't on this image — it was built without --release-tar." >&2
+echo "Rebuild with: mnctl iso build --release-tar <path-to-monolith-bin.tar.gz> ..." >&2
+echo "Or install manually: pacstrap + arch-chroot (see the motd)." >&2
+exit 1
