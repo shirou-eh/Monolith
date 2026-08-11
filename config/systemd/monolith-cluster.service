@@ -1,0 +1,25 @@
+[Unit]
+Description=Monolith OS cluster membership (shared filesystem mount)
+Documentation=https://github.com/shirou-eh/Monolith
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/monolith/cluster/cluster.toml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Mounting the shared cluster filesystem is what actually needs to happen
+# on every boot — `cluster init`/`cluster join` write the node's identity
+# (master token, worker registration) once and are deliberately NOT rerun
+# here, since re-running `init` rotates the token and would strand every
+# worker already joined with the old one.
+ExecStart=/usr/bin/mnctl cluster fs mount
+ExecStartPost=-/usr/bin/mnctl cluster status
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monolith-cluster
+
+[Install]
+WantedBy=multi-user.target

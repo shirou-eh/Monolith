@@ -149,22 +149,44 @@ fn generate_token() -> String {
     )
 }
 
+/// Find this machine's LAN-facing IPv4 address without depending on the
+/// `hostname` binary (part of `inetutils`, not installed on a minimal
+/// Arch/Monolith box). `ip`, from `iproute2`, always is. Skips loopback
+/// and container bridges (`docker0`, `br-*`) so the advertised address
+/// is actually reachable from another physical machine on the LAN.
+fn detect_local_ip() -> Result<String> {
+    let output = Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "scope", "global"])
+        .output()
+        .context("failed to run `ip addr` — is iproute2 installed?")?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        // Format: "3: enp2s0    inet 192.168.8.8/24 brd ... scope global ..."
+        let iface = line.split_whitespace().nth(1).unwrap_or("");
+        if iface.starts_with("docker") || iface.starts_with("br-") || iface.starts_with("veth") {
+            continue;
+        }
+        if let Some(addr) = line
+            .split_whitespace()
+            .skip_while(|w| *w != "inet")
+            .nth(1)
+        {
+            if let Some(ip) = addr.split('/').next() {
+                return Ok(ip.to_string());
+            }
+        }
+    }
+
+    anyhow::bail!("no non-loopback, non-container IPv4 address found — pass --advertise-ip explicitly")
+}
+
 fn cluster_init(name: Option<&str>, advertise_ip: Option<&str>) -> Result<()> {
     let cluster_name = name.unwrap_or("monolith-cluster");
 
     let ip = match advertise_ip {
         Some(ip) => ip.to_string(),
-        None => {
-            let output = Command::new("hostname")
-                .args(["-I"])
-                .output()
-                .context("failed to detect IP")?;
-            String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .next()
-                .unwrap_or("127.0.0.1")
-                .to_string()
-        }
+        None => detect_local_ip().context("failed to detect IP")?,
     };
 
     let config_dir = "/etc/monolith/cluster";
