@@ -76,6 +76,15 @@ enum MonitorCommand {
         #[arg(long)]
         reset: bool,
     },
+    /// Serve Monolith-specific metrics in Prometheus text-exposition
+    /// format — meant to run alongside node_exporter, not replace it:
+    /// this exposes numbers only Monolith itself knows (cluster peers,
+    /// anomaly baseline, autobalance job outcomes), not host CPU/RAM/disk.
+    Exporter {
+        /// Port to listen on
+        #[arg(long, default_value_t = 9469)]
+        port: u16,
+    },
 }
 
 impl MonitorArgs {
@@ -104,6 +113,7 @@ impl MonitorArgs {
             MonitorCommand::Dashboard => launch_dashboard(),
             MonitorCommand::Export { format, out } => export_metrics(&format, out.as_deref()),
             MonitorCommand::Anomaly { metric, reset } => monitor_anomaly(&metric, reset),
+            MonitorCommand::Exporter { port } => monitor_exporter(port),
         }
     }
 }
@@ -821,5 +831,108 @@ fn export_metrics(format: &str, out: Option<&str>) -> Result<()> {
     }
 
     println!("{} metrics exported to {out_path}", "●".green());
+    Ok(())
+}
+
+/// Cumulative counts of "ok"/"failed" lines in the autobalance log, if
+/// `mnctl cluster autobalance` has ever run on this host. Cheap enough
+/// to rescan on every scrape for a log that's realistically thousands
+/// of lines, not millions — this is a niche exporter, not a hot path.
+fn autobalance_job_counts() -> (u64, u64) {
+    let log_path = "/var/lib/monolith/cluster/jobs/autobalance.log";
+    let content = std::fs::read_to_string(log_path).unwrap_or_default();
+    let ok = content.lines().filter(|l| l.ends_with(": ok")).count() as u64;
+    let failed = content.lines().filter(|l| l.ends_with(": failed")).count() as u64;
+    (ok, failed)
+}
+
+fn cluster_peer_count() -> u64 {
+    std::fs::read_to_string("/etc/monolith/cluster/cluster.toml")
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("master_ip") || l.starts_with("advertise_ip"))
+        .count() as u64
+}
+
+fn security_anomaly_baseline() -> f64 {
+    #[derive(serde::Deserialize, Default)]
+    struct Baseline {
+        ewma: f64,
+    }
+    std::fs::read_to_string("/var/lib/monolith/security/anomaly-baseline.json")
+        .ok()
+        .and_then(|s| serde_json::from_str::<Baseline>(&s).ok())
+        .unwrap_or_default()
+        .ewma
+}
+
+fn load1() -> f64 {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(|s| s.to_string()))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// Render the current snapshot as Prometheus text-exposition format
+/// (version 0.0.4 — plain `# HELP`/`# TYPE` + `metric value` lines,
+/// no client library needed for something this small).
+fn render_prometheus_metrics() -> String {
+    let (ok, failed) = autobalance_job_counts();
+    let mut out = String::new();
+    out.push_str("# HELP monolith_up Always 1 while the exporter is answering scrapes.\n");
+    out.push_str("# TYPE monolith_up gauge\n");
+    out.push_str("monolith_up 1\n");
+
+    out.push_str("# HELP monolith_cluster_peers_configured Peer nodes listed in this host's cluster config.\n");
+    out.push_str("# TYPE monolith_cluster_peers_configured gauge\n");
+    out.push_str(&format!("monolith_cluster_peers_configured {}\n", cluster_peer_count()));
+
+    out.push_str("# HELP monolith_security_anomaly_baseline Learned EWMA baseline from `mnctl security anomaly` (warning+ lines/window).\n");
+    out.push_str("# TYPE monolith_security_anomaly_baseline gauge\n");
+    out.push_str(&format!("monolith_security_anomaly_baseline {:.4}\n", security_anomaly_baseline()));
+
+    out.push_str("# HELP monolith_autobalance_jobs_total Cluster autobalance jobs dispatched, by outcome.\n");
+    out.push_str("# TYPE monolith_autobalance_jobs_total counter\n");
+    out.push_str(&format!("monolith_autobalance_jobs_total{{status=\"ok\"}} {ok}\n"));
+    out.push_str(&format!("monolith_autobalance_jobs_total{{status=\"failed\"}} {failed}\n"));
+
+    out.push_str("# HELP monolith_load1 1-minute load average.\n");
+    out.push_str("# TYPE monolith_load1 gauge\n");
+    out.push_str(&format!("monolith_load1 {:.2}\n", load1()));
+
+    out
+}
+
+/// Minimal HTTP/1.0-style responder — no framework, just enough to
+/// answer a Prometheus scrape (a bare GET, any path). Each connection
+/// gets one response and is closed; that's all a scraper ever asks for.
+fn monitor_exporter(port: u16) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind(("0.0.0.0", port))
+        .with_context(|| format!("failed to bind exporter port {port}"))?;
+    println!("{} Monolith exporter listening on :{port}/metrics", "●".green());
+
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // We don't care what was requested — read and discard the
+        // request so the client isn't left hanging on a half-open
+        // write, then always answer with the metrics snapshot.
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+
+        let body = render_prometheus_metrics();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
     Ok(())
 }

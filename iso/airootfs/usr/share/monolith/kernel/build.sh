@@ -297,13 +297,7 @@ install_kernel() {
     pkg_file=$(find "${pkg_dir}" -name "monolith-kernel-*.pkg.tar.*" -print -quit 2>/dev/null || true)
 
     if [[ -n "${pkg_file}" ]]; then
-        # --overwrite scoped to just the modules path this script itself
-        # might have written outside pacman's tracking on an earlier run
-        # that fell back to the direct-install path below (e.g. because
-        # makepkg failed that time) — not a blanket overwrite. Without
-        # this, a later run where packaging *does* succeed conflicts
-        # with its own earlier untracked leftovers and installs nothing.
-        pacman -U --overwrite "/usr/lib/modules/${krelease}/*" --noconfirm "${pkg_file}" 2>&1 | tee -a "${LOG_FILE}"
+        pacman -U --noconfirm "${pkg_file}" 2>&1 | tee -a "${LOG_FILE}"
     else
         warn "No package file — installing modules and vmlinuz directly (no pacman entry, so 'pacman -R monolith-kernel' won't remove it — see the snapper pre-kernel snapshot to roll back instead)"
         cd "${KERNEL_SRC_DIR}"

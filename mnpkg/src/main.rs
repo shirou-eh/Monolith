@@ -79,6 +79,55 @@ enum Commands {
     Size,
     /// Show installation/removal history
     History,
+    /// Manage a custom pacman package repository
+    Repo(RepoArgs),
+}
+
+#[derive(clap::Args)]
+struct RepoArgs {
+    #[command(subcommand)]
+    command: RepoCommand,
+}
+
+#[derive(Subcommand)]
+enum RepoCommand {
+    /// Create a new local repo directory (database is built on first `add`/`build`)
+    Init {
+        /// Directory to hold the repo
+        path: String,
+        /// Repo name — becomes <name>.db.tar.gz, and the [name] in pacman.conf
+        #[arg(long, default_value = "monolith")]
+        name: String,
+    },
+    /// Copy package file(s) into the repo and rebuild its database
+    Add {
+        /// Repo directory (from `repo init`)
+        path: String,
+        /// One or more built .pkg.tar.zst / .pkg.tar.xz files
+        #[arg(required = true)]
+        packages: Vec<String>,
+        #[arg(long, default_value = "monolith")]
+        name: String,
+    },
+    /// Rebuild the repo database from whatever package files are already in the directory
+    Build {
+        path: String,
+        #[arg(long, default_value = "monolith")]
+        name: String,
+    },
+    /// Serve the repo directory over plain HTTP
+    Serve {
+        path: String,
+        #[arg(long, default_value_t = 8899)]
+        port: u16,
+    },
+    /// Print the pacman.conf block to add this repo on another machine
+    Snippet {
+        /// Base URL where `repo serve` (or any web server) exposes the directory
+        url: String,
+        #[arg(long, default_value = "monolith")]
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -110,6 +159,16 @@ async fn main() -> Result<()> {
         Commands::Orphans => list_orphans(),
         Commands::Size => package_sizes(),
         Commands::History => show_history(),
+        Commands::Repo(args) => match args.command {
+            RepoCommand::Init { path, name } => repo_init(&path, &name),
+            RepoCommand::Add { path, packages, name } => repo_add(&path, &packages, &name),
+            RepoCommand::Build { path, name } => repo_build(&path, &name),
+            RepoCommand::Serve { path, port } => repo_serve(&path, port),
+            RepoCommand::Snippet { url, name } => {
+                repo_snippet(&url, &name);
+                Ok(())
+            }
+        },
     }
 }
 
@@ -678,4 +737,161 @@ fn show_history() -> Result<()> {
         println!("{}", "No package history available.".dimmed());
     }
     Ok(())
+}
+
+fn repo_init(path: &str, name: &str) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("failed to create {path}"))?;
+    println!("{} Repo directory ready at {path}", "●".green());
+    println!("  {} Add packages: mnpkg repo add {path} <file.pkg.tar.zst>", "→".blue());
+    println!("  {} Then, on other machines, add to /etc/pacman.conf:", "→".blue());
+    println!();
+    repo_snippet(&format!("file://{path}"), name);
+    Ok(())
+}
+
+/// Every *.pkg.tar.zst / *.pkg.tar.xz / *.pkg.tar.gz in `path`, sorted so
+/// `repo-add`'s output order is stable across runs.
+fn repo_package_files(path: &str) -> Result<Vec<String>> {
+    let mut files: Vec<String> = std::fs::read_dir(path)
+        .with_context(|| format!("failed to read repo directory {path}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.ends_with(".pkg.tar.zst") || name.ends_with(".pkg.tar.xz") || name.ends_with(".pkg.tar.gz")
+        })
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+fn run_repo_add(path: &str, name: &str) -> Result<()> {
+    if which::which("repo-add").is_err() {
+        anyhow::bail!("repo-add not found — install pacman-contrib");
+    }
+
+    let files = repo_package_files(path)?;
+    if files.is_empty() {
+        anyhow::bail!("no .pkg.tar.* files in {path} yet");
+    }
+
+    let db_path = format!("{path}/{name}.db.tar.gz");
+    let mut cmd = Command::new("repo-add");
+    cmd.arg(&db_path);
+    cmd.args(&files);
+    let status = cmd.status().context("failed to run repo-add")?;
+    if !status.success() {
+        anyhow::bail!("repo-add failed");
+    }
+
+    println!("{} {name}.db.tar.gz rebuilt ({} package(s))", "●".green(), files.len());
+    Ok(())
+}
+
+fn repo_add(path: &str, packages: &[String], name: &str) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("failed to create {path}"))?;
+
+    for pkg in packages {
+        let src = std::path::Path::new(pkg);
+        if !src.exists() {
+            anyhow::bail!("package file not found: {pkg}");
+        }
+        let filename = src.file_name().ok_or_else(|| anyhow::anyhow!("bad package path: {pkg}"))?;
+        let dest = std::path::Path::new(path).join(filename);
+        if src.canonicalize().ok() != dest.canonicalize().ok() {
+            std::fs::copy(src, &dest).with_context(|| format!("failed to copy {pkg} into {path}"))?;
+        }
+        println!("  {} {}", "●".green(), filename.to_string_lossy());
+    }
+
+    run_repo_add(path, name)
+}
+
+fn repo_build(path: &str, name: &str) -> Result<()> {
+    run_repo_add(path, name)
+}
+
+/// Minimal read-only static file server — enough for `pacman -Sy` to pull
+/// the db file and package archives over HTTP from another Monolith node
+/// on the LAN. No directory listing beyond what's needed to fetch a
+/// named file; paths are resolved and checked to stay inside `path` so a
+/// request can't walk out of the repo directory with `../`.
+fn repo_serve(path: &str, port: u16) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let root = std::fs::canonicalize(path).with_context(|| format!("repo directory not found: {path}"))?;
+    let listener = TcpListener::bind(("0.0.0.0", port)).with_context(|| format!("failed to bind port {port}"))?;
+    println!("{} Serving {} on http://0.0.0.0:{port}/", "●".green(), path);
+    println!("  {} Ctrl+C to stop", "→".blue());
+
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let mut reader = BufReader::new(stream.try_clone().expect("clone tcp stream"));
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+            continue;
+        }
+
+        // "GET /path HTTP/1.1"
+        let requested = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/")
+            .trim_start_matches('/');
+        let requested = urlencoding_decode(requested);
+
+        let candidate = root.join(&requested);
+        let resolved = std::fs::canonicalize(&candidate).ok().filter(|p| p.starts_with(&root) && p.is_file());
+
+        match resolved {
+            Some(file_path) => {
+                if let Ok(mut file) = std::fs::File::open(&file_path) {
+                    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = std::io::copy(&mut file, &mut stream);
+                } else {
+                    let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+                }
+            }
+            None => {
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nnot found");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `%XX`-decode a request path. Just enough for filenames pacman itself
+/// generates (letters, digits, `-`, `_`, `.`, `+`, `~`) — not a full URL
+/// decoder, but this only ever needs to round-trip what `repo-add`
+/// produced in the same directory.
+fn urlencoding_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                out.push(byte as char);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn repo_snippet(url: &str, name: &str) {
+    println!("[{name}]");
+    println!("SigLevel = Optional TrustAll");
+    println!("Server = {url}");
 }

@@ -349,6 +349,25 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         let _ = tx.send(InstallMsg::Log("Writing /etc/os-release...".to_string()));
         let _ = std::fs::write("/mnt/etc/os-release", MONOLITH_OS_RELEASE);
 
+        // Step 7c: Deploy the kernel build script. Without this,
+        // `mnctl update kernel` looks for it at
+        // /usr/share/monolith/kernel/build.sh, finds nothing (nothing
+        // else ever put it there), and silently falls back to
+        // `pacman -S monolith-kernel` regardless of what the user asked
+        // for. Copied from the live ISO environment (airootfs ships it
+        // at the same path) rather than embedded here, so it stays a
+        // single source of truth in kernel/build.sh.
+        let _ = std::fs::create_dir_all("/mnt/usr/share/monolith");
+        if std::path::Path::new("/usr/share/monolith/kernel").exists() {
+            run_install_step(
+                &tx,
+                65,
+                "Installing kernel build script...",
+                "cp",
+                &["-r", "/usr/share/monolith/kernel", "/mnt/usr/share/monolith/"],
+            );
+        }
+
         // Step 8: Set keyboard layout
         run_install_step(
             &tx,

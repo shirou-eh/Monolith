@@ -38,22 +38,41 @@ enum ClusterCommand {
     Sync,
     /// Deploy a service to cluster node(s)
     Deploy {
-        /// Service name
+        /// Service name (systemd unit)
         service: String,
-        /// Target nodes (comma-separated or 'all')
+        /// Target nodes (comma-separated hostnames, or 'all' for every
+        /// peer plus this node)
         #[arg(long, default_value = "all")]
         nodes: String,
     },
-    /// Perform a rolling update across all nodes in the cluster
+    /// Perform a rolling update across peer nodes: drain, update the
+    /// package (optional), restart the service, wait for it to report
+    /// healthy, uncordon — one chunk of nodes at a time. Aborts the rest
+    /// of the rollout the moment a node fails its post-restart health
+    /// check, so a bad build can't cascade to the whole cluster in one
+    /// pass.
     RollingUpdate {
-        /// Image to update to
+        /// systemd unit to restart on each node
+        #[arg(long, default_value = "monolith-cluster-autobalance")]
+        service: String,
+        /// Package to install before restarting (mnpkg install <image>)
         image: Option<String>,
         /// Max number of nodes to update concurrently
         #[arg(long, default_value_t = 1)]
         concurrency: u32,
-        /// Skip drain step
+        /// Skip cordon/drain and uncordon steps
         #[arg(long)]
         no_drain: bool,
+    },
+    /// Mark a node unschedulable — `cluster schedule`/`autobalance` skip it
+    Drain {
+        /// Node hostname
+        node: String,
+    },
+    /// Clear a node's drain/cordon mark, making it schedulable again
+    Uncordon {
+        /// Node hostname
+        node: String,
     },
     /// Shared filesystem across cluster nodes
     Fs(FsArgs),
@@ -115,7 +134,11 @@ impl ClusterArgs {
             ClusterCommand::Status => cluster_status(),
             ClusterCommand::Sync => cluster_sync(),
             ClusterCommand::Deploy { service, nodes } => cluster_deploy(&service, &nodes),
-            ClusterCommand::RollingUpdate { image, concurrency, no_drain } => cluster_rolling_update(image.as_deref(), concurrency, no_drain),
+            ClusterCommand::RollingUpdate { service, image, concurrency, no_drain } => {
+                cluster_rolling_update(&service, image.as_deref(), concurrency, no_drain)
+            }
+            ClusterCommand::Drain { node } => cluster_drain(&node),
+            ClusterCommand::Uncordon { node } => cluster_uncordon(&node),
             ClusterCommand::Fs(args) => match args.command {
                 FsCommand::Mount { at } => cluster_fs_mount(&at),
                 FsCommand::Umount { at } => cluster_fs_umount(&at),
@@ -291,7 +314,26 @@ fn cluster_nodes() -> Result<()> {
     let hostname = nix::unistd::gethostname()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "this-node".to_string());
-    println!("  {} {:<20} master (this node)", "●".green(), hostname);
+    let cordoned = read_cordoned();
+    let self_state = if cordoned.contains(&hostname) { "cordoned".yellow() } else { "ready".green() };
+    println!("  {} {:<20} this node          {}", "●".green(), hostname, self_state);
+
+    for node in read_peer_nodes() {
+        let reachable = Command::new("ssh")
+            .args(["-o", "ConnectTimeout=3", "-o", "BatchMode=yes", &node, "true"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let mark = if reachable { "●".green() } else { "●".red() };
+        let state = if !reachable {
+            "unreachable".red()
+        } else if cordoned.contains(&node) {
+            "cordoned".yellow()
+        } else {
+            "ready".green()
+        };
+        println!("  {mark} {node:<20} peer               {state}");
+    }
     Ok(())
 }
 
@@ -315,91 +357,202 @@ fn cluster_sync() -> Result<()> {
     Ok(())
 }
 
-fn cluster_deploy(service: &str, nodes: &str) -> Result<()> {
-    println!(
-        "{} Deploying '{}' to nodes: {}",
-        "→".blue(),
-        service.bold(),
-        nodes
-    );
-    println!(
-        "{} Service '{}' deployed to {}",
-        "●".green(),
-        service.bold(),
-        nodes
-    );
+/// Path to the cordon-state file: one hostname per line. Consulted by
+/// `pick_best_node` (so `schedule`/`autobalance` skip cordoned nodes) and
+/// by `cluster nodes` (to show the mark). Local, not synced to peers —
+/// each node's own scheduler only needs to know about nodes *it* might
+/// dispatch to.
+fn cordon_file() -> String {
+    "/var/lib/monolith/cluster/cordoned".to_string()
+}
+
+fn read_cordoned() -> Vec<String> {
+    std::fs::read_to_string(cordon_file())
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn cluster_drain(node: &str) -> Result<()> {
+    let path = cordon_file();
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).context("failed to create cluster state dir")?;
+    }
+    let mut cordoned = read_cordoned();
+    if !cordoned.iter().any(|n| n == node) {
+        cordoned.push(node.to_string());
+        std::fs::write(&path, cordoned.join("\n") + "\n").context("failed to write cordon state")?;
+    }
+    println!("{} {} marked unschedulable", "●".yellow(), node.bold());
     Ok(())
 }
 
-fn cluster_rolling_update(image: Option<&str>, concurrency: u32, no_drain: bool) -> Result<()> {
-    let cluster_cfg = std::fs::read_to_string("/etc/monolith/cluster.toml")
-        .context("failed to read /etc/monolith/cluster.toml — initialize cluster first")?;
+fn cluster_uncordon(node: &str) -> Result<()> {
+    let path = cordon_file();
+    let cordoned: Vec<String> = read_cordoned().into_iter().filter(|n| n != node).collect();
+    std::fs::write(&path, cordoned.join("\n") + if cordoned.is_empty() { "" } else { "\n" })
+        .context("failed to write cordon state")?;
+    println!("{} {} schedulable again", "●".green(), node.bold());
+    Ok(())
+}
 
-    let nodes: Vec<String> = cluster_cfg.lines()
-        .filter(|l| l.contains("role =") || l.contains("address ="))
-        .filter_map(|l| l.split('"').nth(1))
-        .map(|s| s.to_string())
-        .collect();
+/// Deploy = restart a systemd unit across a set of targets. "all" means
+/// every reachable peer plus this node; otherwise a comma-separated list
+/// of hostnames. Runs sequentially and reports per-node outcome instead
+/// of just printing success unconditionally.
+fn cluster_deploy(service: &str, nodes: &str) -> Result<()> {
+    let hostname = nix::unistd::gethostname()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
 
-    if nodes.is_empty() {
-        anyhow::bail!("no cluster nodes found in configuration");
-    }
-
-    println!("{} Rolling update across {} nodes", "→".blue().bold(), nodes.len());
-    println!("  Concurrency: {concurrency}");
-    if let Some(img) = image {
-        println!("  Image:       {img}");
+    let targets: Vec<String> = if nodes == "all" {
+        let mut t = vec![hostname.clone()];
+        t.extend(read_peer_nodes());
+        t
     } else {
-        println!("  Image:       (current — no upgrade)");
+        nodes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+
+    if targets.is_empty() {
+        anyhow::bail!("no target nodes resolved from '{nodes}'");
     }
 
-    for chunk in nodes.chunks(concurrency as usize) {
+    println!("{} Restarting '{}' on: {}", "→".blue(), service.bold(), targets.join(", "));
+
+    let mut failed = Vec::new();
+    for node in &targets {
+        let ok = if *node == hostname {
+            Command::new("systemctl").args(["restart", service]).status().map(|s| s.success()).unwrap_or(false)
+        } else {
+            Command::new("ssh")
+                .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", node, "sudo", "-n", "systemctl", "restart", service])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        println!("  {} {node}", if ok { "●".green() } else { "●".red() });
+        if !ok {
+            failed.push(node.clone());
+        }
+    }
+
+    if failed.is_empty() {
+        println!("{} '{}' deployed to {} node(s)", "●".green(), service.bold(), targets.len());
+        Ok(())
+    } else {
+        anyhow::bail!("'{}' failed to restart on: {}", service, failed.join(", "));
+    }
+}
+
+/// Whether a systemd unit is `active` on `node` (local check if `node`
+/// is this host, ssh otherwise). Used as the post-restart health gate.
+fn service_is_active(node: &str, hostname: &str, service: &str) -> bool {
+    if node == hostname {
+        Command::new("systemctl").args(["is-active", "--quiet", service]).status().map(|s| s.success()).unwrap_or(false)
+    } else {
+        Command::new("ssh")
+            .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", node, "systemctl", "is-active", "--quiet", service])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Wait up to ~15s for `service` to report active on `node`, polling
+/// every second. A restart that leaves a unit crash-looping shows up
+/// here instead of the rollout declaring victory the instant the ssh
+/// command that issued `restart` returns.
+fn wait_healthy(node: &str, hostname: &str, service: &str) -> bool {
+    for _ in 0..15 {
+        if service_is_active(node, hostname, service) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    false
+}
+
+/// Rolling update across peer nodes, one chunk at a time: cordon, update
+/// package (optional), restart `service`, wait for it to come back
+/// healthy, uncordon. The moment a node fails its health check the whole
+/// rollout stops — remaining nodes are left exactly as they were, rather
+/// than ploughing ahead and taking the entire cluster down with a bad
+/// build.
+fn cluster_rolling_update(service: &str, image: Option<&str>, concurrency: u32, no_drain: bool) -> Result<()> {
+    let nodes = read_peer_nodes();
+    if nodes.is_empty() {
+        anyhow::bail!("no peer nodes found — initialize/join a cluster first (mnctl cluster init/join)");
+    }
+
+    println!("{} Rolling update across {} node(s)", "→".blue().bold(), nodes.len());
+    println!("  Service:     {service}");
+    println!("  Concurrency: {concurrency}");
+    println!("  Image:       {}", image.unwrap_or("(current — no upgrade)"));
+
+    let hostname = nix::unistd::gethostname()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
+
+    for chunk in nodes.chunks((concurrency.max(1)) as usize) {
         let mut handles = Vec::new();
 
         for node in chunk {
             let node = node.clone();
             let image = image.map(|s| s.to_string());
+            let service = service.to_string();
+            let hostname = hostname.clone();
 
-            handles.push(std::thread::spawn(move || -> Result<()> {
+            handles.push(std::thread::spawn(move || -> (String, bool) {
                 println!("  {} Updating {node}...", "→".blue());
 
                 if !no_drain {
-                    println!("    Draining {node}...");
-                    let drain = std::process::Command::new("ssh")
-                        .args([&node, "mnctl", "cluster", "drain", &node])
-                        .status();
-                    match drain {
-                        Ok(s) if s.success() => println!("    {} Drained", "●".green()),
-                        _ => println!("    {} Drain failed (continuing)", "⚠".yellow()),
-                    }
+                    let _ = cluster_drain(&node);
                 }
 
                 if let Some(img) = &image {
-                    println!("    Updating image on {node}...");
-                    let _ = std::process::Command::new("ssh")
-                        .args([&node, "mnpkg", "install", &img])
+                    println!("    Installing {img} on {node}...");
+                    let _ = Command::new("ssh")
+                        .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", &node, "sudo", "-n", "mnpkg", "install", img])
                         .status();
                 }
 
-                let _ = std::process::Command::new("ssh")
-                    .args([&node, "systemctl", "restart", "monolith-node"])
-                    .status();
+                let restarted = Command::new("ssh")
+                    .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", &node, "sudo", "-n", "systemctl", "restart", &service])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
 
-                if !no_drain {
-                    println!("    Uncordoning {node}...");
-                    let _ = std::process::Command::new("mnctl")
-                        .args(["cluster", "uncordon", &node])
-                        .status();
+                let healthy = restarted && wait_healthy(&node, &hostname, &service);
+
+                if healthy {
+                    if !no_drain {
+                        let _ = cluster_uncordon(&node);
+                    }
+                    println!("  {} {node} updated and healthy", "●".green());
+                } else {
+                    // Deliberately left cordoned — an operator should look
+                    // at it before it takes traffic again.
+                    println!("  {} {node} FAILED health check after update — left cordoned", "●".red().bold());
                 }
 
-                println!("  {} {node} updated", "●".green());
-                Ok(())
+                (node, healthy)
             }));
         }
 
-        // Wait for this chunk to finish
+        let mut chunk_failed = false;
         for handle in handles {
-            let _ = handle.join();
+            if let Ok((node, healthy)) = handle.join() {
+                if !healthy {
+                    chunk_failed = true;
+                    let _ = node; // already reported above
+                }
+            }
+        }
+
+        if chunk_failed {
+            anyhow::bail!("rollout aborted: a node in this chunk failed its health check — remaining nodes were not touched");
         }
 
         println!("  {} Chunk complete — moving to next batch", "─".dimmed());
@@ -536,10 +689,22 @@ fn local_free_mem_kb() -> Option<u64> {
 /// whichever has the most. `None` means "run locally" — either nothing
 /// beats the local box, or there are no reachable peers at all.
 fn pick_best_node() -> Option<(String, u64)> {
-    let local_kb = local_free_mem_kb().unwrap_or(0);
+    let cordoned = read_cordoned();
+    let hostname = nix::unistd::gethostname()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
+
+    // A cordoned local node can't win either — otherwise `cluster drain
+    // <this-node>` (e.g. right before a rolling update touches it) would
+    // be pointless, since "no peer beats local" already falls back to
+    // running here.
+    let local_kb = if cordoned.contains(&hostname) { None } else { local_free_mem_kb() };
     let mut best: Option<(String, u64)> = None;
 
     for node in read_peer_nodes() {
+        if cordoned.contains(&node) {
+            continue;
+        }
         if let Some(kb) = peer_free_mem_kb(&node) {
             if best.as_ref().map(|(_, b)| kb > *b).unwrap_or(true) {
                 best = Some((node, kb));
@@ -547,8 +712,9 @@ fn pick_best_node() -> Option<(String, u64)> {
         }
     }
 
-    match best {
-        Some((node, kb)) if kb > local_kb => Some((node, kb)),
+    match (best, local_kb) {
+        (Some((node, kb)), Some(local)) if kb > local => Some((node, kb)),
+        (Some((node, kb)), None) => Some((node, kb)),
         _ => None,
     }
 }

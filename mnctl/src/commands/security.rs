@@ -55,6 +55,19 @@ enum SecurityCommand {
         /// Source IP to react to
         ip: String,
     },
+    /// Log-based anomaly detection: flags journal error-rate spikes
+    /// against a learned per-host baseline instead of a fixed threshold
+    Anomaly {
+        /// Restrict to one systemd unit (default: whole journal)
+        #[arg(long)]
+        unit: Option<String>,
+        /// Seconds per evaluation window
+        #[arg(long, default_value_t = 300)]
+        window_secs: u64,
+        /// Run a single evaluation pass and exit instead of polling forever
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Args)]
@@ -162,6 +175,9 @@ impl SecurityArgs {
             SecurityCommand::Ids { once } => security_ids(once),
             SecurityCommand::Honeypot { ports } => security_honeypot(&ports),
             SecurityCommand::React { ip } => security_react(&ip),
+            SecurityCommand::Anomaly { unit, window_secs, once } => {
+                security_anomaly(unit.as_deref(), window_secs, once)
+            }
         }
     }
 }
@@ -907,4 +923,103 @@ fn security_react(ip: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct AnomalyBaseline {
+    /// Exponential moving average of error-lines-per-window, learned
+    /// live. Starts at 0 so the very first window can never itself be
+    /// flagged as an anomaly — there's nothing to compare it to yet.
+    ewma: f64,
+}
+
+fn anomaly_state_path() -> String {
+    "/var/lib/monolith/security/anomaly-baseline.json".to_string()
+}
+
+fn load_baseline() -> AnomalyBaseline {
+    std::fs::read_to_string(anomaly_state_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_baseline(b: &AnomalyBaseline) {
+    if let Some(parent) = std::path::Path::new(&anomaly_state_path()).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(b) {
+        let _ = std::fs::write(anomaly_state_path(), json);
+    }
+}
+
+/// Log-based anomaly detection: counts error/warning-priority journal
+/// lines per window and compares against a learned EWMA baseline for
+/// this host, instead of a fixed count like `security_ids` uses for SSH.
+/// A spike well past normal background noise gets flagged — this layers
+/// on top of `security_ids`/`honeypot`/`react`, it doesn't replace them,
+/// since a log-rate spike (a crash-looping service, a burst of app
+/// errors) isn't necessarily an intrusion the way a honeypot hit is.
+fn security_anomaly(unit: Option<&str>, window_secs: u64, once: bool) -> Result<()> {
+    // A spike has to clear both bars to fire: MULTIPLIER over baseline
+    // (relative — scales with how noisy this host normally is) AND
+    // MIN_COUNT in absolute terms (so a baseline of ~0 on a quiet box
+    // doesn't flag the first three log lines of the day as an anomaly).
+    const MULTIPLIER: f64 = 4.0;
+    const MIN_COUNT: f64 = 10.0;
+    // How fast the baseline adapts. Kept low deliberately: a genuine
+    // spike should stay visible for a few windows instead of the
+    // baseline chasing it upward and self-erasing the anomaly.
+    const ALPHA: f64 = 0.2;
+
+    loop {
+        let since = format!("-{window_secs}s");
+        let mut args = vec!["--since", since.as_str(), "-p", "warning..alert", "--no-pager", "-o", "cat"];
+        if let Some(u) = unit {
+            args.push("-u");
+            args.push(u);
+        }
+
+        let output = Command::new("journalctl").args(&args).output();
+
+        match output {
+            Ok(output) => {
+                let count = String::from_utf8_lossy(&output.stdout).lines().count() as f64;
+                let mut baseline = load_baseline();
+
+                let is_spike = count >= MIN_COUNT && baseline.ewma > 0.0 && count > baseline.ewma * MULTIPLIER;
+
+                if is_spike {
+                    println!(
+                        "{} Anomaly: {} warning+ lines this window vs baseline {:.1} ({}x) — {}",
+                        "⚠".red().bold(),
+                        count as u64,
+                        baseline.ewma,
+                        MULTIPLIER as u64,
+                        unit.unwrap_or("journal"),
+                    );
+                    println!(
+                        "  {} Investigate with: journalctl --since '{since}' -p warning..alert{}",
+                        "→".blue(),
+                        unit.map(|u| format!(" -u {u}")).unwrap_or_default(),
+                    );
+                    // Damp the update on a spike window so the baseline
+                    // doesn't immediately absorb the anomaly and go blind
+                    // to it repeating next window.
+                    baseline.ewma = baseline.ewma * (1.0 - ALPHA) + (baseline.ewma * MULTIPLIER) * ALPHA;
+                } else {
+                    println!("{} {} warning+ lines this window (baseline {:.1})", "●".green(), count as u64, baseline.ewma);
+                    baseline.ewma = baseline.ewma * (1.0 - ALPHA) + count * ALPHA;
+                }
+
+                save_baseline(&baseline);
+            }
+            Err(_) => println!("{} journalctl unavailable — skipping this pass", "⚠".yellow()),
+        }
+
+        if once {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(window_secs));
+    }
 }

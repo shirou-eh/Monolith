@@ -76,6 +76,29 @@ enum KubeCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Autoscale a Deployment — the per-template autoscaling hook: point
+    /// it at whatever Deployment a template (`mnctl template deploy`) or
+    /// `mnctl kube apply` already created. Needs metrics-server running
+    /// in-cluster for the resulting HPA to actually do anything.
+    Autoscale {
+        /// Deployment name to autoscale
+        deployment: String,
+        /// Namespace
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// Minimum replicas
+        #[arg(long, default_value_t = 1)]
+        min: u32,
+        /// Maximum replicas
+        #[arg(long, default_value_t = 5)]
+        max: u32,
+        /// Target average CPU utilization percent that triggers scaling
+        #[arg(long, default_value_t = 70)]
+        cpu_target: u32,
+        /// Print the manifest instead of applying it
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 impl KubeArgs {
@@ -115,6 +138,9 @@ impl KubeArgs {
                 }
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 kubectl_execvp(&args_ref)
+            }
+            KubeCommand::Autoscale { deployment, namespace, min, max, cpu_target, dry_run } => {
+                autoscale(&deployment, &namespace, min, max, cpu_target, dry_run)
             }
         }
     }
@@ -313,5 +339,81 @@ fn kubeconfig(cat: bool) -> Result<()> {
     } else {
         println!("{KUBECONFIG_PATH}");
     }
+    Ok(())
+}
+
+/// Build and apply (or print) a `autoscaling/v2` HorizontalPodAutoscaler
+/// for one Deployment. Kept to the one metric that's universally
+/// available without extra setup (CPU) rather than reaching for custom
+/// metrics, which would need Prometheus adapter wiring most Monolith
+/// installs won't have.
+fn autoscale(deployment: &str, namespace: &str, min: u32, max: u32, cpu_target: u32, dry_run: bool) -> Result<()> {
+    if min == 0 || max < min {
+        anyhow::bail!("--max must be >= --min, and --min must be at least 1");
+    }
+
+    let manifest = format!(
+        "apiVersion: autoscaling/v2\n\
+         kind: HorizontalPodAutoscaler\n\
+         metadata:\n\
+         \x20 name: {deployment}-hpa\n\
+         \x20 namespace: {namespace}\n\
+         \x20 labels:\n\
+         \x20   managed-by: mnctl\n\
+         spec:\n\
+         \x20 scaleTargetRef:\n\
+         \x20   apiVersion: apps/v1\n\
+         \x20   kind: Deployment\n\
+         \x20   name: {deployment}\n\
+         \x20 minReplicas: {min}\n\
+         \x20 maxReplicas: {max}\n\
+         \x20 metrics:\n\
+         \x20   - type: Resource\n\
+         \x20     resource:\n\
+         \x20       name: cpu\n\
+         \x20       target:\n\
+         \x20         type: Utilization\n\
+         \x20         averageUtilization: {cpu_target}\n"
+    );
+
+    if dry_run {
+        print!("{manifest}");
+        return Ok(());
+    }
+
+    println!(
+        "{} Autoscaling {} in {}: {min}-{max} replicas, target {cpu_target}% CPU",
+        "→".blue(),
+        deployment.bold(),
+        namespace
+    );
+
+    let bin = if which::which("kubectl").is_ok() { "kubectl" } else { "k3s" };
+    let mut cmd = Command::new(bin);
+    if bin == "k3s" {
+        cmd.arg("kubectl");
+    }
+    cmd.args(["apply", "-f", "-"]);
+    if Path::new(KUBECONFIG_PATH).exists() && std::env::var("KUBECONFIG").is_err() {
+        cmd.env("KUBECONFIG", KUBECONFIG_PATH);
+    }
+    cmd.stdin(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().context("failed to invoke kubectl")?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin.write_all(manifest.as_bytes())?;
+    }
+    let status = child.wait().context("failed to wait for kubectl apply")?;
+
+    if !status.success() {
+        anyhow::bail!("kubectl apply failed for {deployment}-hpa");
+    }
+
+    println!("{} {}-hpa applied", "●".green(), deployment);
+    println!(
+        "  {} needs metrics-server running in-cluster to actually scale — check with: mnctl kube kubectl top pods",
+        "→".blue()
+    );
     Ok(())
 }

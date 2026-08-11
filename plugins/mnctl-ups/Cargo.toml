@@ -1,0 +1,27 @@
+[workspace]
+# Standalone on purpose — plugins are distributed independently of the
+# core mnctl/mnpkg/installer/mnweb release, not built as part of it.
+
+[package]
+name = "mnctl-ups"
+version = "0.1.0"
+edition = "2021"
+description = "Monolith mnctl plugin — UPS monitoring with Discord alerts and graceful shutdown"
+license = "MIT"
+
+[[bin]]
+name = "mnctl-ups"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde_json = "1"
+anyhow = "1"
+colored = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

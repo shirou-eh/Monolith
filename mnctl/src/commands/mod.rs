@@ -1,10 +1,13 @@
 pub mod backup;
 pub mod bench;
+pub mod cloud;
 pub mod cluster;
 pub mod config;
 pub mod container;
+pub mod declare;
 pub mod deploy;
 pub mod disk;
+pub mod doctor;
 pub mod info;
 pub mod iso;
 pub mod kube;
@@ -17,6 +20,7 @@ pub mod proxy;
 pub mod secrets;
 pub mod security;
 pub mod service;
+pub mod system;
 pub mod template;
 pub mod tune;
 pub mod tunnel;
@@ -98,6 +102,14 @@ enum Commands {
     Tunnel(tunnel::TunnelArgs),
     /// Encrypted secrets management (age/sops with TPM/YubiKey)
     Secrets(secrets::SecretsArgs),
+    /// Declarative system configuration — reconcile this host to match a spec file
+    Declare(declare::DeclareArgs),
+    /// Host-level system state (immutable root, etc.)
+    System(system::SystemArgs),
+    /// Multi-cloud deployment scaffolding (Terraform + cloud-init)
+    Cloud(cloud::CloudArgs),
+    /// Rule-based diagnostics against known Monolith footguns
+    Doctor(doctor::DoctorArgs),
 }
 
 impl Cli {
@@ -128,6 +140,10 @@ impl Cli {
             Commands::Tune(args) => args.run().await,
             Commands::Tunnel(args) => args.run().await,
             Commands::Secrets(args) => args.run().await,
+            Commands::Declare(args) => args.run().await,
+            Commands::System(args) => args.run().await,
+            Commands::Cloud(args) => args.run().await,
+            Commands::Doctor(args) => args.run().await,
         }
     }
 }

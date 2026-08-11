@@ -1,6 +1,6 @@
 # Monolith OS Configuration
 # https://github.com/shirou-eh/Monolith
-# Version: 1.3.0 "Slate"
+# Version: 1.4.0 "Diorite"
 
 [system]
 hostname = ""

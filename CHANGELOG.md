@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.1] — Unreleased — "Obsidian"
 
+## [1.4.0] — Unreleased — "Diorite"
+
+Merges the planned v1.5 "Granite" and v2.0 "Basalt" releases into one.
+See ROADMAP.md for the full per-item breakdown, including what was
+rescoped and what was dropped and why.
+
+### Added
+
+- `mnctl cluster drain` / `uncordon` — real cordon state, consulted by
+  `schedule`/`autobalance`/`rolling-update`
+- `mnctl security anomaly` — log-based anomaly detection against a
+  learned per-host baseline (EWMA), separate from `security ids`'s
+  fixed-threshold SSH check and `monitor anomaly`'s metric-based one
+- `mnctl monitor exporter` — Prometheus exporter for Monolith-specific
+  metrics
+- `mnctl kube autoscale` — per-Deployment HPA generation/apply
+- `mnpkg repo init/add/build/serve` — local pacman repository + a
+  minimal static file server to pull it from another node
+- `mnctl declare apply/init` — declarative reconciliation (profile,
+  hardening, services, firewall) from a spec file
+- `mnctl system immutable enable/disable/status` — read-only root
+  option, `/etc`+`/var`+`/opt` writable via a separate subvolume
+- `mnctl cloud template` — Terraform + cloud-init scaffolding for
+  Hetzner/DigitalOcean/AWS (generates files only, no credentials, no
+  API calls)
+- `mnctl doctor` — rule-based diagnostics against known footguns
+
+### Fixed
+
+- `mnctl cluster rolling-update` read a cluster config path
+  (`/etc/monolith/cluster.toml`) that `cluster init`/`join` never
+  actually wrote, so it always failed to find any nodes on a real
+  cluster. Also restarted a hardcoded `monolith-node` unit that doesn't
+  exist and shelled out to `drain`/`uncordon` subcommands that didn't
+  exist yet. Now reads real peer config, restarts a configurable
+  service, and aborts the rest of the rollout the moment a node fails
+  its post-restart health check.
+- `mnctl cluster deploy` printed success unconditionally without
+  contacting any node. Now actually restarts the target service per
+  node and reports real per-node pass/fail.
+- `mnctl cluster nodes` only ever printed the local hostname as
+  "master (this node)" regardless of cluster size. Now lists real
+  peers with reachability and cordon state.
+- `kernel/build.sh`: `detect_latest_kernel()` returned its version
+  string via `$(...)`, but the script's own log function wrote to
+  stdout too — so the captured "version" was the whole log transcript
+  glued to the real version number, and every download URL built from
+  it was garbage. Logging now goes to stderr.
+- `kernel/build.sh`: `configs/*.config` is a curated fragment, not a
+  complete `.config` — copying it straight in and running `make` left
+  thousands of symbols unresolved with no `olddefconfig` step to fill
+  them from upstream defaults. Added that step.
+- `kernel/build.sh`: toolchain selection checked only for `clang`, then
+  unconditionally pinned `AR=llvm-ar`/`NM=llvm-nm`/etc — on a host with
+  clang+lld but not the separate `llvm` package (no `llvm-ar`), the
+  build got partway in and died on the first missing tool. Now checks
+  for the full LLVM toolchain and uses the kernel build system's own
+  `LLVM=1` switch; falls back to GCC otherwise.
+- `kernel/build.sh`: no upfront check for build prerequisites (`bc` in
+  particular) meant a missing tool surfaced as a build failure ~5
+  minutes in instead of an immediate, actionable error.
+- `kernel/build.sh`: `make install` on a hand-built source tree
+  (without `/sbin/installkernel` set up the way Arch's own `linux`
+  package does) silently installs nothing rather than failing — so the
+  "installed directly" fallback path was doing nothing at all. Now
+  copies the built image directly. Also, `mkinitcpio -p monolith`
+  always failed (no such preset ships anywhere) and silently fell back
+  to `-P`, rebuilding every *existing* preset instead of the kernel
+  that was just installed. Now targets the new kernel's version/output
+  path explicitly. `makepkg` also refuses to run as root outright,
+  which this script does by default under `sudo mnctl update kernel`
+  — now builds the package as the invoking unprivileged user
+  (`$SUDO_USER`) and falls back to the direct-install path if there
+  isn't one.
+- `mnctl update kernel` looked for `kernel/build.sh` at
+  `/usr/share/monolith/kernel/build.sh`, a path nothing in the
+  installer ever actually populated — so every install silently fell
+  back to `pacman -S monolith-kernel` regardless of intent. Installer
+  now copies `kernel/{build.sh,configs,patches}` into place.
+- Local git identity for 3 commits landed on `main` under the wrong
+  author again after the v1.3.0 history rewrite (local repo config
+  wasn't updated post-rewrite) — corrected and re-pushed.
+
 ## [1.3.0] — Unreleased — "Slate"
 
 A general-purpose release: Monolith stops being server-only, gains a

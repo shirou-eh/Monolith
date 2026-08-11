@@ -41,7 +41,7 @@ Targeted bug-fix and quality-of-life patch. No breaking changes.
 - [x] `mnctl info version --json` and `mnctl security audit --json`
 - [x] mnweb `/api/overview` 2-second response cache (CPU relief on small VPS)
 
-## v1.3.0 "Slate" (Current)
+## v1.3.0 "Slate"
 
 Not server-only anymore, and a reactive security layer instead of
 purely static rules. See CHANGELOG.md for the full list.
@@ -56,44 +56,81 @@ purely static rules. See CHANGELOG.md for the full list.
 - [x] Monolith-branded `/etc/os-release` + distro logo + fastfetch config
 - [x] Fixed: installer never wrote `/etc/os-release` (reported as Arch)
 
-## v1.5 "Granite" (Future)
+## v1.4 "Diorite" (Current)
 
-- [ ] Advanced cluster operations (rolling updates)
-- [ ] Log-based anomaly detection
-- [ ] Custom Prometheus exporters
-- [ ] Per-template auto-scaling hooks for k3s
+Merges what were planned as two separate releases (v1.5 "Granite" and
+v2.0 "Basalt") into one. A few v2.0 items were rescoped on the way in —
+see the notes below each; nothing here is aspirational copy, everything
+shipped is wired up and was actually run.
 
-## v2.0 "Basalt" (Future)
+**Cluster operations** (from "Granite")
+- [x] `mnctl cluster rolling-update` — was reading a config path
+      (`/etc/monolith/cluster.toml`) that `cluster init`/`join` never
+      wrote to, and restarting a hardcoded `monolith-node` unit that
+      doesn't exist. Fixed to read real peer config, restart a
+      configurable service, and gate each node on a post-restart health
+      check — a chunk that fails aborts the rest of the rollout instead
+      of cascading a bad build to the whole cluster.
+- [x] `mnctl cluster drain` / `uncordon` — real cordon state now, not the
+      no-op calls rolling-update used to shell out to
+- [x] `mnctl cluster deploy` — used to just print success without doing
+      anything; now actually restarts the given service on each target
+- [x] `mnctl cluster nodes` — now lists real peers with reachability and
+      cordon state instead of only ever printing "this node"
+- [x] `mnctl security anomaly` — log-based anomaly detection: learns a
+      per-host EWMA baseline of journal warning+ lines per window and
+      flags spikes against it, instead of `security ids`'s fixed
+      SSH-failure threshold
+- [x] `mnctl monitor exporter` — custom Prometheus exporter for
+      Monolith-specific metrics (cluster peers, anomaly baseline,
+      autobalance job outcomes) — runs alongside node_exporter, not
+      instead of it
+- [x] `mnctl kube autoscale` — per-Deployment HPA generation/apply, the
+      per-template autoscaling hook (needs metrics-server in-cluster)
 
-- [ ] Full custom package repository
-- [ ] GUI installer (Wayland)
-- [ ] Declarative system configuration (NixOS-inspired)
-- [ ] Immutable root filesystem option
-- [ ] Built-in secrets management (Vault-like)
-- [ ] Multi-cloud deployment support
-- [ ] AI-assisted troubleshooting
-- [ ] ARM64 optimized kernel with big.LITTLE scheduling
-- [ ] Custom init system integration
-
-## v2.5 "Quartzite" (Proposed)
-
-Not server-only anymore — hardening applies to any Monolith install (desktop/edge included). Three pillars: security, performance, and inter-node clustering.
-
-**Security**
-- [ ] `mnctl security ids` — behavioural intrusion detection layered on existing nftables/AppArmor/fail2ban
-- [ ] `mnctl security honeypot` — decoy services; any hit triggers alert + automatic ban
-- [ ] `mnctl security react` — automatic response to suspicious activity: instant ban + forensic snapshot, no human in the loop
-- [ ] `mnctl security audit --deep` — extends existing audit with config drift, permission, and unexpected-open-port detection
-
-**Performance**
-- [ ] `mnctl tune auto` — continuous sysctl/scheduler auto-tuning based on live load, not a one-time install-time pass
-- [ ] `mnctl gpu` — GPU passthrough for containers/k3s, with driver + utilisation metrics in mnweb
-- [ ] `mnctl profile auto` — automatic switching between `lite`/`full`/`pro` based on observed load instead of manual `mnctl profile set`
-- [ ] `mnctl bench --continuous` — historical benchmark logging to feed the above
-
-**Inter-node clustering (shared files + shared load)**
-- [ ] `mnctl cluster join` — auto-discovers other Monolith nodes on the local network and joins a cluster, zero manual config
-- [ ] `mnctl cluster fs mount` — shared filesystem across nodes (distributed layer over the existing btrfs/snapper stack); a file created on one node is visible on the rest
-- [ ] `mnctl cluster fs sync status` — replication/consistency state between nodes
-- [ ] `mnctl cluster schedule` — workloads land on whichever node has free capacity right now (zero-config layer on top of existing `mnctl kube`/k3s scheduling)
-- [ ] `mnctl cluster status` — fleet-wide view: nodes, free CPU/RAM/disk per node, what's running where
+**Platform** (from "Basalt", rescoped where noted)
+- [x] `mnpkg repo init/add/build/serve` — a real local pacman repository
+      (wraps `repo-add`), plus a minimal static file server so another
+      Monolith node can pull from it over the LAN
+- [x] Declarative system configuration — `mnctl declare apply -f spec.toml`
+      reconciles profile, hardening level, service enable/disable, and
+      firewall rules against a spec file. Smaller in scope than
+      NixOS — a reconciler over existing mnctl commands, not a from-
+      scratch config language.
+- [x] `mnctl system immutable enable/disable/status` — read-only `@`
+      root with `/etc`, `/var`, `/opt` writable via a separate
+      subvolume; edits fstab and requires a reboot rather than
+      remounting live
+- [x] Built-in secrets management (Vault-like) — turned out to already
+      ship (`mnctl secrets`, age-encrypted with TPM/YubiKey/age-key
+      recipients) since v1.0.1. No rebuild needed; listed here only
+      because it was on the original v2.0 list.
+- [x] Multi-cloud deployment support — rescoped to
+      `mnctl cloud template --provider hetzner|digitalocean|aws`:
+      generates Terraform + cloud-init scaffolding. Deliberately does
+      **not** hold cloud credentials or call provider APIs — that's a
+      different, much bigger trust boundary than "generate the files
+      you'd write by hand anyway."
+- [x] GUI installer (Wayland) — rescoped/closed as already covered: the
+      installer (`monolith-installer`) is already a full interactive
+      ratatui TUI wizard (keyboard layout, disk selection, encryption,
+      timezone). A from-scratch Wayland GUI on top of a TUI-first,
+      server-focused distro would be disproportionate scope for what
+      it'd add.
+- [x] AI-assisted troubleshooting — rescoped to `mnctl doctor`: a fixed
+      checklist against bugs this project has actually shipped and
+      fixed (wrong nftables table, missing IP-detection binary, dropped
+      fastfetch modules, unscoped sudoers, disk/service health). Named
+      honestly — it's a rule-based checklist, not a model in the loop.
+- [ ] ARM64 optimized kernel with big.LITTLE scheduling — dropped for
+      this release: no ARM hardware available to build against or test
+      on. `kernel/build.sh` itself got real fixes this cycle (missing
+      `bc`/toolchain prerequisite checks, `olddefconfig` so a config
+      fragment doesn't hang the build, `LLVM=1` toolchain detection that
+      actually checks for `llvm-ar` instead of just `clang`, and a
+      direct-install fallback that no longer silently no-ops when
+      `make install` can't find `/sbin/installkernel`) — ARM64
+      big.LITTLE tuning specifically is the part left for whenever
+      there's a board to validate it on.
+- [ ] Custom init system integration — dropped as underspecified; no
+      concrete init system or use case attached to the original line.
