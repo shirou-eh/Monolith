@@ -119,13 +119,13 @@ async fn setup_playit(port: Option<u16>, secret: Option<String>) -> Result<()> {
         .status()?;
 
     println!();
-    println!(
-        "{} playit.gg tunnel started",
-        "✓".green()
-    );
+    println!("{} playit.gg tunnel started", "✓".green());
     println!("  {} Status:  mnctl tunnel status", "●".cyan());
     println!("  {} Logs:    mnctl tunnel logs", "●".cyan());
-    println!("  {} Web:     https://playit.gg/account/tunnels", "●".cyan());
+    println!(
+        "  {} Web:     https://playit.gg/account/tunnels",
+        "●".cyan()
+    );
     Ok(())
 }
 
@@ -136,7 +136,7 @@ async fn setup_cloudflare(address: Option<String>, token: Option<String>) -> Res
         let arch = std::env::consts::ARCH;
 
         // Use the official cloudflared install script
-        let status = Command::new("curl")
+        let _status = Command::new("curl")
             .args(["-fsSL", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"])
             .status()
             .context("failed to download cloudflared")?;
@@ -202,10 +202,7 @@ async fn setup_cloudflare(address: Option<String>, token: Option<String>) -> Res
             .status()?;
 
         println!();
-        println!(
-            "{} Cloudflare Tunnel started → {addr}",
-            "✓".green()
-        );
+        println!("{} Cloudflare Tunnel started → {addr}", "✓".green());
         println!("  {} Status:  mnctl tunnel status", "●".cyan());
         println!("  {} Logs:    mnctl tunnel logs", "●".cyan());
     } else {
@@ -214,7 +211,10 @@ async fn setup_cloudflare(address: Option<String>, token: Option<String>) -> Res
         println!("{} Cloudflare Tunnel setup required", "→".yellow());
         println!("  1. Go to https://dash.cloudflare.com/ -> Zero Trust -> Networks -> Tunnels");
         println!("  2. Create a tunnel and copy the token");
-        println!("  3. Run: {} --token <your-token>", "mnctl tunnel cloudflare".bold());
+        println!(
+            "  3. Run: {} --token <your-token>",
+            "mnctl tunnel cloudflare".bold()
+        );
         println!();
         println!("  Quick test (10 min): cloudflared tunnel --url http://{addr}");
     }
@@ -232,9 +232,7 @@ fn tunnel_status() -> Result<()> {
     println!();
 
     for (name, label) in &tunnels {
-        let output = Command::new("systemctl")
-            .args(["is-active", name])
-            .output();
+        let output = Command::new("systemctl").args(["is-active", name]).output();
 
         let status = match output {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),

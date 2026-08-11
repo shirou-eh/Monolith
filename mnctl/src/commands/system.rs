@@ -61,22 +61,43 @@ fn immutable_status() -> Result<()> {
         .unwrap_or_default()
         .lines()
         .find(|l| l.split_whitespace().nth(1) == Some("/"))
-        .map(|l| l.split_whitespace().nth(3).unwrap_or("").split(',').any(|o| o == "ro"))
+        .map(|l| {
+            l.split_whitespace()
+                .nth(3)
+                .unwrap_or("")
+                .split(',')
+                .any(|o| o == "ro")
+        })
         .unwrap_or(false);
 
     println!("{}", "Immutable root:".bold().underline());
     println!(
         "  {} {} in fstab",
-        if configured { "●".green() } else { "○".dimmed() },
-        if configured { "configured" } else { "not configured" }
+        if configured {
+            "●".green()
+        } else {
+            "○".dimmed()
+        },
+        if configured {
+            "configured"
+        } else {
+            "not configured"
+        }
     );
     println!(
         "  {} currently mounted {}",
-        if live_ro { "●".green() } else { "●".yellow() },
+        if live_ro {
+            "●".green()
+        } else {
+            "●".yellow()
+        },
         if live_ro { "read-only" } else { "read-write" }
     );
     if configured != live_ro {
-        println!("  {} fstab and the live mount disagree — reboot to apply the fstab state", "→".blue());
+        println!(
+            "  {} fstab and the live mount disagree — reboot to apply the fstab state",
+            "→".blue()
+        );
     }
     Ok(())
 }
@@ -92,7 +113,10 @@ fn immutable_status() -> Result<()> {
 fn immutable_enable() -> Result<()> {
     let fstab = std::fs::read_to_string(FSTAB).context("failed to read /etc/fstab")?;
     if fstab.contains(MARKER_BEGIN) {
-        println!("{}", "Already configured. Reboot if you haven't yet.".yellow());
+        println!(
+            "{}",
+            "Already configured. Reboot if you haven't yet.".yellow()
+        );
         return Ok(());
     }
 
@@ -106,7 +130,9 @@ fn immutable_enable() -> Result<()> {
 
     let root_line = match root_line {
         Some(l) => l,
-        None => anyhow::bail!("couldn't find the root ('/') entry in {FSTAB} — not touching it blind"),
+        None => {
+            anyhow::bail!("couldn't find the root ('/') entry in {FSTAB} — not touching it blind")
+        }
     };
 
     let fields: Vec<&str> = root_line.split_whitespace().collect();
@@ -118,8 +144,13 @@ fn immutable_enable() -> Result<()> {
     let device = fields[0];
     let fstype = fields[2];
 
-    println!("{} Creating @var_overlay subvolume for writable state...", "→".blue());
-    let status = Command::new("btrfs").args(["subvolume", "create", "/.overlay-staging"]).status();
+    println!(
+        "{} Creating @var_overlay subvolume for writable state...",
+        "→".blue()
+    );
+    let status = Command::new("btrfs")
+        .args(["subvolume", "create", "/.overlay-staging"])
+        .status();
     // Best-effort: on a system where /.overlay-staging already exists
     // from a previous attempt this fails harmlessly and we move on.
     let _ = status;
@@ -130,16 +161,25 @@ fn immutable_enable() -> Result<()> {
     let opt_line = format!("{device} /opt {fstype} subvol=@var_overlay/opt,rw,compress=zstd 0 0");
 
     let mut new_fstab = fstab.replacen(&root_line, &ro_line, 1);
-    new_fstab.push_str(&format!("\n{MARKER_BEGIN}\n{etc_line}\n{var_line}\n{opt_line}\n{MARKER_END}\n"));
+    new_fstab.push_str(&format!(
+        "\n{MARKER_BEGIN}\n{etc_line}\n{var_line}\n{opt_line}\n{MARKER_END}\n"
+    ));
 
     let backup = format!("{FSTAB}.pre-immutable");
-    std::fs::write(&backup, &fstab).with_context(|| format!("failed to back up fstab to {backup}"))?;
+    std::fs::write(&backup, &fstab)
+        .with_context(|| format!("failed to back up fstab to {backup}"))?;
     std::fs::write(FSTAB, &new_fstab).context("failed to write /etc/fstab")?;
 
     println!("{} /etc/fstab updated (backup at {backup})", "●".green());
     println!("  {} root will mount read-only on next boot; /etc, /var, /opt stay writable via @var_overlay", "→".blue());
-    println!("  {} this does NOT remount live — reboot to apply", "⚠".yellow().bold());
-    println!("  {} to undo before rebooting: mnctl system immutable disable", "→".blue());
+    println!(
+        "  {} this does NOT remount live — reboot to apply",
+        "⚠".yellow().bold()
+    );
+    println!(
+        "  {} to undo before rebooting: mnctl system immutable disable",
+        "→".blue()
+    );
     Ok(())
 }
 
@@ -178,7 +218,10 @@ fn immutable_disable() -> Result<()> {
             out
         };
         std::fs::write(FSTAB, stripped).context("failed to write /etc/fstab")?;
-        println!("{} /etc/fstab reverted (no backup found — reconstructed rw entry)", "●".green());
+        println!(
+            "{} /etc/fstab reverted (no backup found — reconstructed rw entry)",
+            "●".green()
+        );
     }
 
     println!("  {} reboot required to apply", "⚠".yellow());

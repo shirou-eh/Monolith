@@ -134,9 +134,12 @@ impl ClusterArgs {
             ClusterCommand::Status => cluster_status(),
             ClusterCommand::Sync => cluster_sync(),
             ClusterCommand::Deploy { service, nodes } => cluster_deploy(&service, &nodes),
-            ClusterCommand::RollingUpdate { service, image, concurrency, no_drain } => {
-                cluster_rolling_update(&service, image.as_deref(), concurrency, no_drain)
-            }
+            ClusterCommand::RollingUpdate {
+                service,
+                image,
+                concurrency,
+                no_drain,
+            } => cluster_rolling_update(&service, image.as_deref(), concurrency, no_drain),
             ClusterCommand::Drain { node } => cluster_drain(&node),
             ClusterCommand::Uncordon { node } => cluster_uncordon(&node),
             ClusterCommand::Fs(args) => match args.command {
@@ -145,9 +148,11 @@ impl ClusterArgs {
                 FsCommand::SyncStatus => cluster_fs_sync_status(),
             },
             ClusterCommand::Schedule { command } => cluster_schedule(&command),
-            ClusterCommand::AutoBalance { watch_dir, interval, once } => {
-                cluster_autobalance(&watch_dir, interval, once)
-            }
+            ClusterCommand::AutoBalance {
+                watch_dir,
+                interval,
+                once,
+            } => cluster_autobalance(&watch_dir, interval, once),
         }
     }
 }
@@ -208,18 +213,16 @@ fn detect_local_ip() -> Result<String> {
         if iface.starts_with("docker") || iface.starts_with("br-") || iface.starts_with("veth") {
             continue;
         }
-        if let Some(addr) = line
-            .split_whitespace()
-            .skip_while(|w| *w != "inet")
-            .nth(1)
-        {
+        if let Some(addr) = line.split_whitespace().skip_while(|w| *w != "inet").nth(1) {
             if let Some(ip) = addr.split('/').next() {
                 return Ok(ip.to_string());
             }
         }
     }
 
-    anyhow::bail!("no non-loopback, non-container IPv4 address found — pass --advertise-ip explicitly")
+    anyhow::bail!(
+        "no non-loopback, non-container IPv4 address found — pass --advertise-ip explicitly"
+    )
 }
 
 fn cluster_init(name: Option<&str>, advertise_ip: Option<&str>) -> Result<()> {
@@ -315,16 +318,36 @@ fn cluster_nodes() -> Result<()> {
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "this-node".to_string());
     let cordoned = read_cordoned();
-    let self_state = if cordoned.contains(&hostname) { "cordoned".yellow() } else { "ready".green() };
-    println!("  {} {:<20} this node          {}", "●".green(), hostname, self_state);
+    let self_state = if cordoned.contains(&hostname) {
+        "cordoned".yellow()
+    } else {
+        "ready".green()
+    };
+    println!(
+        "  {} {:<20} this node          {}",
+        "●".green(),
+        hostname,
+        self_state
+    );
 
     for node in read_peer_nodes() {
         let reachable = Command::new("ssh")
-            .args(["-o", "ConnectTimeout=3", "-o", "BatchMode=yes", &node, "true"])
+            .args([
+                "-o",
+                "ConnectTimeout=3",
+                "-o",
+                "BatchMode=yes",
+                &node,
+                "true",
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        let mark = if reachable { "●".green() } else { "●".red() };
+        let mark = if reachable {
+            "●".green()
+        } else {
+            "●".red()
+        };
         let state = if !reachable {
             "unreachable".red()
         } else if cordoned.contains(&node) {
@@ -383,7 +406,8 @@ fn cluster_drain(node: &str) -> Result<()> {
     let mut cordoned = read_cordoned();
     if !cordoned.iter().any(|n| n == node) {
         cordoned.push(node.to_string());
-        std::fs::write(&path, cordoned.join("\n") + "\n").context("failed to write cordon state")?;
+        std::fs::write(&path, cordoned.join("\n") + "\n")
+            .context("failed to write cordon state")?;
     }
     println!("{} {} marked unschedulable", "●".yellow(), node.bold());
     Ok(())
@@ -392,8 +416,11 @@ fn cluster_drain(node: &str) -> Result<()> {
 fn cluster_uncordon(node: &str) -> Result<()> {
     let path = cordon_file();
     let cordoned: Vec<String> = read_cordoned().into_iter().filter(|n| n != node).collect();
-    std::fs::write(&path, cordoned.join("\n") + if cordoned.is_empty() { "" } else { "\n" })
-        .context("failed to write cordon state")?;
+    std::fs::write(
+        &path,
+        cordoned.join("\n") + if cordoned.is_empty() { "" } else { "\n" },
+    )
+    .context("failed to write cordon state")?;
     println!("{} {} schedulable again", "●".green(), node.bold());
     Ok(())
 }
@@ -412,22 +439,46 @@ fn cluster_deploy(service: &str, nodes: &str) -> Result<()> {
         t.extend(read_peer_nodes());
         t
     } else {
-        nodes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        nodes
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     };
 
     if targets.is_empty() {
         anyhow::bail!("no target nodes resolved from '{nodes}'");
     }
 
-    println!("{} Restarting '{}' on: {}", "→".blue(), service.bold(), targets.join(", "));
+    println!(
+        "{} Restarting '{}' on: {}",
+        "→".blue(),
+        service.bold(),
+        targets.join(", ")
+    );
 
     let mut failed = Vec::new();
     for node in &targets {
         let ok = if *node == hostname {
-            Command::new("systemctl").args(["restart", service]).status().map(|s| s.success()).unwrap_or(false)
+            Command::new("systemctl")
+                .args(["restart", service])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
         } else {
             Command::new("ssh")
-                .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", node, "sudo", "-n", "systemctl", "restart", service])
+                .args([
+                    "-o",
+                    "ConnectTimeout=5",
+                    "-o",
+                    "BatchMode=yes",
+                    node,
+                    "sudo",
+                    "-n",
+                    "systemctl",
+                    "restart",
+                    service,
+                ])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
@@ -439,7 +490,12 @@ fn cluster_deploy(service: &str, nodes: &str) -> Result<()> {
     }
 
     if failed.is_empty() {
-        println!("{} '{}' deployed to {} node(s)", "●".green(), service.bold(), targets.len());
+        println!(
+            "{} '{}' deployed to {} node(s)",
+            "●".green(),
+            service.bold(),
+            targets.len()
+        );
         Ok(())
     } else {
         anyhow::bail!("'{}' failed to restart on: {}", service, failed.join(", "));
@@ -450,10 +506,24 @@ fn cluster_deploy(service: &str, nodes: &str) -> Result<()> {
 /// is this host, ssh otherwise). Used as the post-restart health gate.
 fn service_is_active(node: &str, hostname: &str, service: &str) -> bool {
     if node == hostname {
-        Command::new("systemctl").args(["is-active", "--quiet", service]).status().map(|s| s.success()).unwrap_or(false)
+        Command::new("systemctl")
+            .args(["is-active", "--quiet", service])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     } else {
         Command::new("ssh")
-            .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", node, "systemctl", "is-active", "--quiet", service])
+            .args([
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "BatchMode=yes",
+                node,
+                "systemctl",
+                "is-active",
+                "--quiet",
+                service,
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -480,16 +550,30 @@ fn wait_healthy(node: &str, hostname: &str, service: &str) -> bool {
 /// rollout stops — remaining nodes are left exactly as they were, rather
 /// than ploughing ahead and taking the entire cluster down with a bad
 /// build.
-fn cluster_rolling_update(service: &str, image: Option<&str>, concurrency: u32, no_drain: bool) -> Result<()> {
+fn cluster_rolling_update(
+    service: &str,
+    image: Option<&str>,
+    concurrency: u32,
+    no_drain: bool,
+) -> Result<()> {
     let nodes = read_peer_nodes();
     if nodes.is_empty() {
-        anyhow::bail!("no peer nodes found — initialize/join a cluster first (mnctl cluster init/join)");
+        anyhow::bail!(
+            "no peer nodes found — initialize/join a cluster first (mnctl cluster init/join)"
+        );
     }
 
-    println!("{} Rolling update across {} node(s)", "→".blue().bold(), nodes.len());
+    println!(
+        "{} Rolling update across {} node(s)",
+        "→".blue().bold(),
+        nodes.len()
+    );
     println!("  Service:     {service}");
     println!("  Concurrency: {concurrency}");
-    println!("  Image:       {}", image.unwrap_or("(current — no upgrade)"));
+    println!(
+        "  Image:       {}",
+        image.unwrap_or("(current — no upgrade)")
+    );
 
     let hostname = nix::unistd::gethostname()
         .map(|h| h.to_string_lossy().to_string())
@@ -514,12 +598,34 @@ fn cluster_rolling_update(service: &str, image: Option<&str>, concurrency: u32, 
                 if let Some(img) = &image {
                     println!("    Installing {img} on {node}...");
                     let _ = Command::new("ssh")
-                        .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", &node, "sudo", "-n", "mnpkg", "install", img])
+                        .args([
+                            "-o",
+                            "ConnectTimeout=5",
+                            "-o",
+                            "BatchMode=yes",
+                            &node,
+                            "sudo",
+                            "-n",
+                            "mnpkg",
+                            "install",
+                            img,
+                        ])
                         .status();
                 }
 
                 let restarted = Command::new("ssh")
-                    .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", &node, "sudo", "-n", "systemctl", "restart", &service])
+                    .args([
+                        "-o",
+                        "ConnectTimeout=5",
+                        "-o",
+                        "BatchMode=yes",
+                        &node,
+                        "sudo",
+                        "-n",
+                        "systemctl",
+                        "restart",
+                        &service,
+                    ])
                     .status()
                     .map(|s| s.success())
                     .unwrap_or(false);
@@ -534,7 +640,10 @@ fn cluster_rolling_update(service: &str, image: Option<&str>, concurrency: u32, 
                 } else {
                     // Deliberately left cordoned — an operator should look
                     // at it before it takes traffic again.
-                    println!("  {} {node} FAILED health check after update — left cordoned", "●".red().bold());
+                    println!(
+                        "  {} {node} FAILED health check after update — left cordoned",
+                        "●".red().bold()
+                    );
                 }
 
                 (node, healthy)
@@ -620,14 +729,20 @@ fn cluster_fs_mount(at: &str) -> Result<()> {
         }
     }
 
-    println!("{} Cluster filesystem mounted at {}", "●".green(), at.bold());
+    println!(
+        "{} Cluster filesystem mounted at {}",
+        "●".green(),
+        at.bold()
+    );
     Ok(())
 }
 
 fn cluster_fs_umount(at: &str) -> Result<()> {
     for node in read_peer_nodes() {
         let node_mount = format!("{at}/{node}");
-        let _ = Command::new("fusermount").args(["-u", &node_mount]).status();
+        let _ = Command::new("fusermount")
+            .args(["-u", &node_mount])
+            .status();
     }
     println!("{} Cluster filesystem unmounted from {}", "●".green(), at);
     Ok(())
@@ -643,7 +758,14 @@ fn cluster_fs_sync_status() -> Result<()> {
     println!("{}", "Cluster FS reachability:".bold().underline());
     for node in &nodes {
         let reachable = Command::new("ssh")
-            .args(["-o", "ConnectTimeout=3", "-o", "BatchMode=yes", node, "true"])
+            .args([
+                "-o",
+                "ConnectTimeout=3",
+                "-o",
+                "BatchMode=yes",
+                node,
+                "true",
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -667,8 +789,14 @@ fn cluster_fs_sync_status() -> Result<()> {
 fn peer_free_mem_kb(node: &str) -> Option<u64> {
     let output = Command::new("ssh")
         .args([
-            "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
-            node, "awk", "/MemAvailable/{print $2}", "/proc/meminfo",
+            "-o",
+            "ConnectTimeout=3",
+            "-o",
+            "BatchMode=yes",
+            node,
+            "awk",
+            "/MemAvailable/{print $2}",
+            "/proc/meminfo",
         ])
         .output()
         .ok()?;
@@ -698,7 +826,11 @@ fn pick_best_node() -> Option<(String, u64)> {
     // <this-node>` (e.g. right before a rolling update touches it) would
     // be pointless, since "no peer beats local" already falls back to
     // running here.
-    let local_kb = if cordoned.contains(&hostname) { None } else { local_free_mem_kb() };
+    let local_kb = if cordoned.contains(&hostname) {
+        None
+    } else {
+        local_free_mem_kb()
+    };
     let mut best: Option<(String, u64)> = None;
 
     for node in read_peer_nodes() {
@@ -722,14 +854,22 @@ fn pick_best_node() -> Option<(String, u64)> {
 fn cluster_schedule(command: &str) -> Result<()> {
     match pick_best_node() {
         Some((node, kb)) => {
-            println!("{} Scheduling on {} ({} MB free)", "→".blue(), node.bold(), kb / 1024);
+            println!(
+                "{} Scheduling on {} ({} MB free)",
+                "→".blue(),
+                node.bold(),
+                kb / 1024
+            );
             let status = Command::new("ssh").args([&node, command]).status()?;
             if !status.success() {
                 anyhow::bail!("command failed on {node}");
             }
         }
         None => {
-            println!("{} Running locally — this box has the most free capacity", "→".blue());
+            println!(
+                "{} Running locally — this box has the most free capacity",
+                "→".blue()
+            );
             let status = Command::new("sh").args(["-c", command]).status()?;
             if !status.success() {
                 anyhow::bail!("command failed locally");
@@ -769,14 +909,15 @@ fn cluster_autobalance(watch_dir: &str, interval: u64, once: bool) -> Result<()>
 
             let (target, status) = match pick_best_node() {
                 Some((node, kb)) => {
-                    println!(
-                        "{} {name} → {node} ({} MB free)",
-                        "→".blue(),
-                        kb / 1024
-                    );
+                    println!("{} {name} → {node} ({} MB free)", "→".blue(), kb / 1024);
                     let mut ssh_cmd = Command::new("ssh");
                     ssh_cmd.args([
-                        "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", &node, "bash",
+                        "-o",
+                        "ConnectTimeout=3",
+                        "-o",
+                        "BatchMode=yes",
+                        &node,
+                        "bash",
                     ]);
                     let status = run_piped(&mut ssh_cmd, &script);
                     (node, status)
@@ -801,7 +942,11 @@ fn cluster_autobalance(watch_dir: &str, interval: u64, once: bool) -> Result<()>
                 "{ts} {name} -> {target} : {}\n",
                 if ok { "ok" } else { "failed" }
             );
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
                 use std::io::Write;
                 let _ = f.write_all(line.as_bytes());
             }

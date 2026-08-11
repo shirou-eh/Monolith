@@ -25,6 +25,10 @@ enum DeployCommand {
         /// Environment variables (KEY=VALUE)
         #[arg(long, short)]
         env: Vec<String>,
+        /// Pull environment from `mnctl secrets` instead of the command
+        /// line — "name" for all keys, "name:KEY" for just one
+        #[arg(long = "env-secret")]
+        env_secret: Vec<String>,
         /// Domain for reverse proxy + TLS
         #[arg(long)]
         domain: Option<String>,
@@ -83,14 +87,20 @@ impl DeployArgs {
                 name,
                 port,
                 env,
+                env_secret,
                 domain,
-            } => deploy_app(&source, &name, port, &env, domain.as_deref()),
+            } => deploy_app(&source, &name, port, &env, &env_secret, domain.as_deref()),
             DeployCommand::List => list_deployments(),
             DeployCommand::Status { name } => deployment_status(&name),
             DeployCommand::Update { name } => update_deployment(&name),
             DeployCommand::Remove { name } => remove_deployment(&name),
             DeployCommand::Rollback { name, to } => deploy_rollback(&name, to.as_deref()),
-            DeployCommand::Canary { name, pct, promote, abort } => deploy_canary(&name, pct, promote, abort),
+            DeployCommand::Canary {
+                name,
+                pct,
+                promote,
+                abort,
+            } => deploy_canary(&name, pct, promote, abort),
             DeployCommand::Watch { name } => deploy_watch(&name),
         }
     }
@@ -119,6 +129,7 @@ fn deploy_app(
     name: &str,
     port: u16,
     env: &[String],
+    env_secret: &[String],
     domain: Option<&str>,
 ) -> Result<()> {
     let deploy_dir = format!("/var/lib/monolith/deployments/{name}");
@@ -190,16 +201,35 @@ fn deploy_app(
     }
 
     let env_args: Vec<String> = env.iter().map(|e| format!("-e {e}")).collect();
+    let secret_env_files = if env_secret.is_empty() {
+        Vec::new()
+    } else {
+        super::secrets::resolve_env_secrets(env_secret)
+            .context("failed to resolve --env-secret — run `mnctl secrets init <name>` first")?
+    };
+
+    let env_section = if env_args.is_empty() {
+        String::new()
+    } else {
+        let env_lines: Vec<String> = env.iter().map(|e| format!("      - {e}")).collect();
+        format!("environment:\n{}", env_lines.join("\n"))
+    };
+    let env_file_section = if secret_env_files.is_empty() {
+        String::new()
+    } else {
+        // Each of these is a plaintext temp file (see resolve_env_secrets)
+        // — readable only by the deploying user/root, cleaned up by the OS
+        // tmp lifecycle, not left permanently in the deployment directory.
+        let lines: Vec<String> = secret_env_files
+            .iter()
+            .map(|p| format!("      - {p}"))
+            .collect();
+        format!("env_file:\n{}", lines.join("\n"))
+    };
 
     let compose_content = format!(
         "services:\n  {name}:\n    build: {work_dir}\n    container_name: monolith-{name}\n    \
-         ports:\n      - \"{port}:{port}\"\n    restart: unless-stopped\n    {env_section}\n",
-        env_section = if env_args.is_empty() {
-            String::new()
-        } else {
-            let env_lines: Vec<String> = env.iter().map(|e| format!("      - {e}")).collect();
-            format!("environment:\n{}", env_lines.join("\n"))
-        }
+         ports:\n      - \"{port}:{port}\"\n    restart: unless-stopped\n    {env_section}\n    {env_file_section}\n"
     );
 
     let compose_path = format!("{deploy_dir}/docker-compose.yml");
@@ -341,7 +371,11 @@ fn deploy_rollback(name: &str, version: Option<&str>) -> Result<()> {
             println!("  {line}");
         }
         println!();
-        println!("  Roll back: {} deploy rollback {} --to <version>", "mnctl".bold(), name);
+        println!(
+            "  Roll back: {} deploy rollback {} --to <version>",
+            "mnctl".bold(),
+            name
+        );
         return Ok(());
     }
 
@@ -353,7 +387,12 @@ fn deploy_rollback(name: &str, version: Option<&str>) -> Result<()> {
         anyhow::bail!("version '{}' not found in history", v);
     }
 
-    println!("{} Rolling back '{}' to version {}...", "→".blue(), name.bold(), v);
+    println!(
+        "{} Rolling back '{}' to version {}...",
+        "→".blue(),
+        name.bold(),
+        v
+    );
     std::fs::copy(&backup_compose, &compose_path)?;
 
     let status = std::process::Command::new("docker")
@@ -397,16 +436,27 @@ fn deploy_canary(name: &str, pct: u8, promote: bool, abort: bool) -> Result<()> 
 
     // Read existing compose and create canary variant
     let content = std::fs::read_to_string(&compose_path)?;
-    let canary_content = content.replace(&format!("container_name: monolith-{name}"), &format!("container_name: monolith-{name}-canary"));
+    let canary_content = content.replace(
+        &format!("container_name: monolith-{name}"),
+        &format!("container_name: monolith-{name}-canary"),
+    );
 
     std::fs::write(&canary_compose, &canary_content)?;
 
     // Save current compose as versioned backup
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    std::fs::copy(&compose_path, format!("{deploy_dir}/docker-compose.{ts}.yml"))?;
+    std::fs::copy(
+        &compose_path,
+        format!("{deploy_dir}/docker-compose.{ts}.yml"),
+    )?;
 
     // Start the canary
-    println!("{} Deploying canary ({}%) for '{}'...", "→".blue(), pct, name.bold());
+    println!(
+        "{} Deploying canary ({}%) for '{}'...",
+        "→".blue(),
+        pct,
+        name.bold()
+    );
     let status = std::process::Command::new("docker")
         .args(["compose", "-f", &canary_compose, "up", "-d", "--build"])
         .status()?;
@@ -421,9 +471,22 @@ fn deploy_canary(name: &str, pct: u8, promote: bool, abort: bool) -> Result<()> 
             8081, pct,
         );
 
-        println!("  {} nginx upstream split configured ({pct}% → canary)", "→".blue());
-        println!("  {} Promote: {} deploy canary {} --promote", "●".cyan(), "mnctl".bold(), name);
-        println!("  {} Abort:   {} deploy canary {} --abort", "●".cyan(), "mnctl".bold(), name);
+        println!(
+            "  {} nginx upstream split configured ({pct}% → canary)",
+            "→".blue()
+        );
+        println!(
+            "  {} Promote: {} deploy canary {} --promote",
+            "●".cyan(),
+            "mnctl".bold(),
+            name
+        );
+        println!(
+            "  {} Abort:   {} deploy canary {} --abort",
+            "●".cyan(),
+            "mnctl".bold(),
+            name
+        );
     }
     Ok(())
 }
@@ -440,7 +503,11 @@ fn deploy_watch(name: &str) -> Result<()> {
         Ok(o) if o.status.success() => {
             let status = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if status != "running" {
-                anyhow::bail!("container {} is not running (status: {})", container, status);
+                anyhow::bail!(
+                    "container {} is not running (status: {})",
+                    container,
+                    status
+                );
             }
         }
         _ => anyhow::bail!("container '{}' not found. Deploy it first.", container),
@@ -452,7 +519,13 @@ fn deploy_watch(name: &str) -> Result<()> {
     println!();
 
     let status = std::process::Command::new("docker")
-        .args(["stats", "--no-stream", "--format", "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}", &container])
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}",
+            &container,
+        ])
         .status()
         .context("failed to run docker stats")?;
 

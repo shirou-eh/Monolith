@@ -231,7 +231,9 @@ fn to_cpu_result() -> Result<CpuBenchResult> {
     let start = Instant::now();
     let single_result = busy_loop(ITERATIONS);
     let single = start.elapsed();
-    if single_result == 0 { print!(""); }
+    if single_result == 0 {
+        print!("");
+    }
     let single_ms = single.as_millis();
     let single_ops = ops_per_sec(ITERATIONS, single);
 
@@ -245,16 +247,26 @@ fn to_cpu_result() -> Result<CpuBenchResult> {
             total.fetch_add(r, Ordering::Relaxed);
         }));
     }
-    for h in handles { let _ = h.join(); }
+    for h in handles {
+        let _ = h.join();
+    }
     let multi = start.elapsed();
     let multi_ms = multi.as_millis();
     let multi_ops = ops_per_sec(ITERATIONS * cpus as u64, multi);
-    if total.load(Ordering::Relaxed) == 0 { print!(""); }
+    if total.load(Ordering::Relaxed) == 0 {
+        print!("");
+    }
 
     let speedup = if multi.as_secs_f64() > 0.0 {
         single.as_secs_f64() * cpus as f64 / multi.as_secs_f64()
-    } else { 0.0 };
-    let efficiency = if cpus > 0 { speedup / cpus as f64 * 100.0 } else { 0.0 };
+    } else {
+        0.0
+    };
+    let efficiency = if cpus > 0 {
+        speedup / cpus as f64 * 100.0
+    } else {
+        0.0
+    };
 
     Ok(CpuBenchResult {
         single_thread_ms: single_ms,
@@ -273,42 +285,87 @@ fn to_memory_result() -> Result<MemoryBenchResult> {
     let data: Vec<u8> = vec![0xAA; size];
     let elapsed = start.elapsed();
     let write_gbps = size as f64 / elapsed.as_secs_f64() / 1024.0 / 1024.0 / 1024.0;
-    if data[size / 2] == 0 { print!(""); }
+    if data[size / 2] == 0 {
+        print!("");
+    }
 
     let start = Instant::now();
     let mut sum: u64 = 0;
-    for &byte in data.iter() { sum = sum.wrapping_add(byte as u64); }
+    for &byte in data.iter() {
+        sum = sum.wrapping_add(byte as u64);
+    }
     let elapsed = start.elapsed();
     let read_gbps = size as f64 / elapsed.as_secs_f64() / 1024.0 / 1024.0 / 1024.0;
-    if sum == 0 { print!(""); }
+    if sum == 0 {
+        print!("");
+    }
 
-    Ok(MemoryBenchResult { write_gbps, read_gbps })
+    Ok(MemoryBenchResult {
+        write_gbps,
+        read_gbps,
+    })
 }
 
 fn to_disk_result(path: &str) -> Result<DiskBenchResult> {
     let test_file = format!("{path}/monolith-bench-test");
     let write_out = Command::new("dd")
-        .args(["if=/dev/zero", &format!("of={test_file}"), "bs=1M", "count=256", "conv=fdatasync"])
+        .args([
+            "if=/dev/zero",
+            &format!("of={test_file}"),
+            "bs=1M",
+            "count=256",
+            "conv=fdatasync",
+        ])
         .output()?;
-    let write_speed = String::from_utf8_lossy(&write_out.stderr).lines().last().unwrap_or("unknown").to_string();
-    let _ = Command::new("bash").args(["-c", "echo 3 > /proc/sys/vm/drop_caches"]).status();
+    let write_speed = String::from_utf8_lossy(&write_out.stderr)
+        .lines()
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
+    let _ = Command::new("bash")
+        .args(["-c", "echo 3 > /proc/sys/vm/drop_caches"])
+        .status();
     let read_out = Command::new("dd")
         .args([&format!("if={test_file}"), "of=/dev/null", "bs=1M"])
         .output()?;
-    let read_speed = String::from_utf8_lossy(&read_out.stderr).lines().last().unwrap_or("unknown").to_string();
+    let read_speed = String::from_utf8_lossy(&read_out.stderr)
+        .lines()
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
     let _ = std::fs::remove_file(&test_file);
-    Ok(DiskBenchResult { write_speed, read_speed })
+    Ok(DiskBenchResult {
+        write_speed,
+        read_speed,
+    })
 }
 
 fn to_network_result(target: &str) -> Result<NetworkBenchResult> {
-    let ping_out = Command::new("ping").args(["-c", "5", "-q", target]).output()?;
+    let ping_out = Command::new("ping")
+        .args(["-c", "5", "-q", target])
+        .output()?;
     let stdout = String::from_utf8_lossy(&ping_out.stdout);
-    let latency = stdout.lines().find(|l| l.contains("rtt")).unwrap_or("no data").to_string();
+    let latency = stdout
+        .lines()
+        .find(|l| l.contains("rtt"))
+        .unwrap_or("no data")
+        .to_string();
     let test_url = if target == "1.1.1.1" || target == "cloudflare.com" {
         "https://speed.cloudflare.com/__down?bytes=10000000".to_string()
-    } else { format!("https://{target}") };
+    } else {
+        format!("https://{target}")
+    };
     let curl_out = Command::new("curl")
-        .args(["-o", "/dev/null", "-w", "%{speed_download}", "-sL", "--max-time", "30", &test_url])
+        .args([
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{speed_download}",
+            "-sL",
+            "--max-time",
+            "30",
+            &test_url,
+        ])
         .output();
     let download_mbps = match curl_out {
         Ok(o) if o.status.success() => {
@@ -318,7 +375,10 @@ fn to_network_result(target: &str) -> Result<NetworkBenchResult> {
         }
         _ => 0.0,
     };
-    Ok(NetworkBenchResult { latency, download_mbps })
+    Ok(NetworkBenchResult {
+        latency,
+        download_mbps,
+    })
 }
 
 fn bench_memory(json: bool) -> Result<()> {
@@ -433,7 +493,10 @@ fn bench_disk(path: &str, json: bool) -> Result<()> {
 
 fn bench_network(target: &str, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&to_network_result(target)?)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&to_network_result(target)?)?
+        );
         return Ok(());
     }
     println!("{}", "Network Benchmark".bold().underline());
@@ -509,17 +572,20 @@ fn bench_compare(baseline: Option<&str>) -> Result<()> {
 
 fn bench_network_p2p() -> Result<()> {
     // Find cluster members from /etc/monolith/cluster.toml
-    let cluster_cfg = std::fs::read_to_string("/etc/monolith/cluster.toml")
-        .unwrap_or_default();
+    let cluster_cfg = std::fs::read_to_string("/etc/monolith/cluster.toml").unwrap_or_default();
 
-    let nodes: Vec<String> = cluster_cfg.lines()
+    let nodes: Vec<String> = cluster_cfg
+        .lines()
         .filter(|l| l.contains("address ="))
         .filter_map(|l| l.split('"').nth(1))
         .map(|s| s.to_string())
         .collect();
 
     if nodes.is_empty() {
-        println!("{} No cluster nodes found in /etc/monolith/cluster.toml", "●".yellow());
+        println!(
+            "{} No cluster nodes found in /etc/monolith/cluster.toml",
+            "●".yellow()
+        );
         println!("  Running local loopback benchmark...");
 
         // Start iperf3 server in background
@@ -541,17 +607,24 @@ fn bench_network_p2p() -> Result<()> {
 
         let result = String::from_utf8_lossy(&output.stdout).to_string();
         println!("{} Iperf3 loopback result:", "→".blue());
-        for line in result.lines().filter(|l| l.contains("bits/sec") || l.contains("sender") || l.contains("receiver")) {
+        for line in result
+            .lines()
+            .filter(|l| l.contains("bits/sec") || l.contains("sender") || l.contains("receiver"))
+        {
             println!("  {line}");
         }
         return Ok(());
     }
 
-    println!("{} Network Matrix Benchmark — {} nodes", "≡".blue(), nodes.len());
+    println!(
+        "{} Network Matrix Benchmark — {} nodes",
+        "≡".blue(),
+        nodes.len()
+    );
     println!();
 
     for i in 0..nodes.len() {
-        for j in (i+1)..nodes.len() {
+        for j in (i + 1)..nodes.len() {
             let node_a = &nodes[i];
             let node_b = &nodes[j];
             println!("  {} → {}", node_a.bold(), node_b.bold());

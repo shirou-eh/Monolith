@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "mnctl"
-version = "2.5.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "bollard",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "mnpkg"
-version = "2.5.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "mnweb"
-version = "2.5.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "monolith-installer"
-version = "2.5.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "colored",

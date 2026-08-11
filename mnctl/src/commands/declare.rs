@@ -91,29 +91,53 @@ fn run_step(label: &str, dry_run: bool, cmd: &str, args: &[&str]) -> bool {
         println!("  {} {cmd} {}", "would run:".dimmed(), args.join(" "));
         return true;
     }
-    let ok = Command::new(cmd).args(args).status().map(|s| s.success()).unwrap_or(false);
+    let ok = Command::new(cmd)
+        .args(args)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
     println!("  {} {label}", if ok { "●".green() } else { "●".red() });
     ok
 }
 
 fn declare_apply(file: &str, dry_run: bool) -> Result<()> {
-    let content = std::fs::read_to_string(file).with_context(|| format!("failed to read spec {file}"))?;
-    let spec: Spec = toml::from_str(&content).with_context(|| format!("failed to parse spec {file}"))?;
+    let content =
+        std::fs::read_to_string(file).with_context(|| format!("failed to read spec {file}"))?;
+    let spec: Spec =
+        toml::from_str(&content).with_context(|| format!("failed to parse spec {file}"))?;
 
-    println!("{} Reconciling against {file}{}", "→".blue().bold(), if dry_run { " (dry run)".dimmed().to_string() } else { String::new() });
+    println!(
+        "{} Reconciling against {file}{}",
+        "→".blue().bold(),
+        if dry_run {
+            " (dry run)".dimmed().to_string()
+        } else {
+            String::new()
+        }
+    );
 
     let mut failures = 0u32;
 
     if let Some(system) = &spec.system {
         if let Some(profile) = &system.profile {
             println!("{}", "Profile:".bold());
-            if !run_step(&format!("profile set {profile}"), dry_run, "mnctl", &["profile", "set", profile]) {
+            if !run_step(
+                &format!("profile set {profile}"),
+                dry_run,
+                "mnctl",
+                &["profile", "set", profile],
+            ) {
                 failures += 1;
             }
         }
         if let Some(level) = &system.hardening {
             println!("{}", "Hardening:".bold());
-            if !run_step(&format!("harden --level {level}"), dry_run, "mnctl", &["security", "harden", "--level", level]) {
+            if !run_step(
+                &format!("harden --level {level}"),
+                dry_run,
+                "mnctl",
+                &["security", "harden", "--level", level],
+            ) {
                 failures += 1;
             }
         }
@@ -210,6 +234,9 @@ deny = []
 
     std::fs::write(out, example).with_context(|| format!("failed to write {out}"))?;
     println!("{} Example spec written to {out}", "●".green());
-    println!("  {} Edit it, then: mnctl declare apply -f {out}", "→".blue());
+    println!(
+        "  {} Edit it, then: mnctl declare apply -f {out}",
+        "→".blue()
+    );
     Ok(())
 }

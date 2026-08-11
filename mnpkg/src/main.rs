@@ -142,7 +142,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Install { pkg } => install_package(&pkg),
         Commands::Remove { pkg } => remove_package(&pkg),
-        Commands::Update { self_update, version, force } => {
+        Commands::Update {
+            self_update,
+            version,
+            force,
+        } => {
             if self_update || version.is_some() || force {
                 self_update_monolith(force, version.as_deref()).await
             } else {
@@ -161,7 +165,11 @@ async fn main() -> Result<()> {
         Commands::History => show_history(),
         Commands::Repo(args) => match args.command {
             RepoCommand::Init { path, name } => repo_init(&path, &name),
-            RepoCommand::Add { path, packages, name } => repo_add(&path, &packages, &name),
+            RepoCommand::Add {
+                path,
+                packages,
+                name,
+            } => repo_add(&path, &packages, &name),
             RepoCommand::Build { path, name } => repo_build(&path, &name),
             RepoCommand::Serve { path, port } => repo_serve(&path, port),
             RepoCommand::Snippet { url, name } => {
@@ -286,26 +294,27 @@ fn update_packages() -> Result<()> {
     // Read stderr (pacman sends progress to stderr)
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                // Show ALPM transaction lines, download progress, warnings
-                if l.contains("[ALPM]")
-                    || l.contains("warning:")
-                    || l.contains("error:")
-                    || l.contains("Packages (")
-                    || l.contains("Total Download Size")
-                    || l.contains("Total Installed Size")
-                {
-                    // Color-code ALPM actions
-                    if l.contains("] installed") {
-                        println!("  {}", l.green());
-                    } else if l.contains("] removed") {
-                        println!("  {}", l.red());
-                    } else if l.contains("] upgraded") || l.contains("] downgraded") {
-                        println!("  {}", l.yellow());
-                    } else {
-                        println!("  {l}");
-                    }
+        // map_while(Result::ok): a persistent read error would make
+        // .lines() yield Err forever; stop at the first one instead of
+        // spinning on it.
+        for l in reader.lines().map_while(Result::ok) {
+            // Show ALPM transaction lines, download progress, warnings
+            if l.contains("[ALPM]")
+                || l.contains("warning:")
+                || l.contains("error:")
+                || l.contains("Packages (")
+                || l.contains("Total Download Size")
+                || l.contains("Total Installed Size")
+            {
+                // Color-code ALPM actions
+                if l.contains("] installed") {
+                    println!("  {}", l.green());
+                } else if l.contains("] removed") {
+                    println!("  {}", l.red());
+                } else if l.contains("] upgraded") || l.contains("] downgraded") {
+                    println!("  {}", l.yellow());
+                } else {
+                    println!("  {l}");
                 }
             }
         }
@@ -405,10 +414,7 @@ fn rollback() -> Result<()> {
             let lockfile = "/var/lib/pacman/db.lck";
             if std::path::Path::new(lockfile).exists() {
                 let _ = std::fs::remove_file(lockfile);
-                println!(
-                    "  {} Removed stale pacman lock file",
-                    "●".yellow()
-                );
+                println!("  {} Removed stale pacman lock file", "●".yellow());
             }
             println!(
                 "Use: {} update rollback --to <ID> to restore a specific snapshot",
@@ -494,7 +500,7 @@ fn audit_packages() -> Result<()> {
                 println!("{}", "Vulnerable packages:".bold().underline());
                 // Render CVE IDs as OSC 8 hyperlinks for modern terminals
                 for line in stdout.lines() {
-                    let mut line = line.to_string();
+                    let line = line.to_string();
                     // Find CVE-XXXX-XXXX patterns and wrap with hyperlink
                     let mut replaced = String::new();
                     let mut rest = line.as_str();
@@ -506,9 +512,7 @@ fn audit_packages() -> Result<()> {
                             .unwrap_or(rest.len());
                         let cve_id = &rest[start..cve_end];
                         let url = format!("https://security.archlinux.org/{cve_id}");
-                        replaced.push_str(&format!(
-                            "\x1b]8;;{url}\x1b\\{cve_id}\x1b]8;;\x1b\\"
-                        ));
+                        replaced.push_str(&format!("\x1b]8;;{url}\x1b\\{cve_id}\x1b]8;;\x1b\\"));
                         rest = &rest[cve_end..];
                     }
                     replaced.push_str(rest);
@@ -630,26 +634,31 @@ async fn self_update_monolith(force: bool, version: Option<&str>) -> Result<()> 
         .build()
         .context("failed to build HTTP client")?;
 
-    let tag = match version {
-        Some(v) => v.trim_start_matches('v').to_string(),
-        None => {
-            println!("{} Checking {repo} for the latest release...", "→".blue());
-            let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-            let resp = client
-                .get(&url)
-                .send()
-                .await
-                .context("failed to reach GitHub")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("GitHub API returned {} — check network / rate limit", resp.status());
-            }
-            let release: GithubRelease = resp
-                .json()
-                .await
-                .context("failed to parse GitHub release JSON")?;
-            release.tag_name.trim_start_matches('v').to_string()
-        }
+    // Fetch the release object (by tag if given, latest otherwise) so we
+    // can match against its real `assets` list below instead of guessing
+    // a filename — a guessed name is one release-asset-rename away from
+    // silently 404ing.
+    println!("{} Checking {repo}...", "→".blue());
+    let api_url = match version {
+        Some(v) => format!(
+            "https://api.github.com/repos/{repo}/releases/tags/v{}",
+            v.trim_start_matches('v')
+        ),
+        None => format!("https://api.github.com/repos/{repo}/releases/latest"),
     };
+    let resp = client
+        .get(&api_url)
+        .send()
+        .await
+        .context("failed to reach GitHub")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub API returned {} for {api_url} — check network / rate limit / that this version was released", resp.status());
+    }
+    let release: GithubRelease = resp
+        .json()
+        .await
+        .context("failed to parse GitHub release JSON")?;
+    let tag = release.tag_name.trim_start_matches('v').to_string();
 
     let current = env!("CARGO_PKG_VERSION");
     if tag == current && !force {
@@ -667,23 +676,43 @@ async fn self_update_monolith(force: bool, version: Option<&str>) -> Result<()> 
     // Same rule as a normal `mnpkg update`: snapshot before touching anything.
     println!("{} Creating pre-update snapshot...", "→".blue());
     let _ = Command::new("snapper")
-        .args(["create", "--description", &format!("pre-mnpkg-self-update-{tag}"), "--type", "pre"])
+        .args([
+            "create",
+            "--description",
+            &format!("pre-mnpkg-self-update-{tag}"),
+            "--type",
+            "pre",
+        ])
         .output();
 
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
-    let tarball_name = format!("monolith-{arch}-unknown-{os}-gnu.tar.gz");
-    let url = format!("https://github.com/{repo}/releases/download/v{tag}/{tarball_name}");
+    let expected_infix = format!("{arch}-unknown-{os}-gnu");
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name.contains(&expected_infix) && a.name.ends_with(".tar.gz"))
+        .ok_or_else(|| {
+            let available: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
+            anyhow::anyhow!(
+                "no release asset matching '*{expected_infix}*.tar.gz' in v{tag}. Available assets: {}",
+                if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+            )
+        })?;
 
-    println!("  {} Downloading {tarball_name}...", "↓".cyan());
+    println!("  {} Downloading {}...", "↓".cyan(), asset.name);
     let resp = client
-        .get(&url)
+        .get(&asset.browser_download_url)
         .send()
         .await
-        .with_context(|| format!("failed to download {tarball_name}"))?;
+        .with_context(|| format!("failed to download {}", asset.name))?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("download failed with HTTP {} — is v{tag} released?", resp.status());
+        anyhow::bail!(
+            "download failed with HTTP {} for {}",
+            resp.status(),
+            asset.browser_download_url
+        );
     }
 
     let bytes = resp.bytes().await.context("failed to read response body")?;
@@ -692,22 +721,39 @@ async fn self_update_monolith(force: bool, version: Option<&str>) -> Result<()> 
 
     let install_dir = "/usr/local/bin";
     println!("  {} Extracting to {install_dir}...", "→".blue());
-    let output = Command::new("sh")
-        .args(["-c", &format!("tar -xzf {tmp} -C {install_dir}")])
+    // Direct argv, not `sh -c` — tmp/install_dir are fixed constants here
+    // so there's no injection risk either way, but keeping every exec on
+    // the same argv-only pattern the rest of this project uses means
+    // there's exactly one thing to audit, not two.
+    let output = Command::new("tar")
+        .args(["-xzf", tmp, "-C", install_dir])
         .output()
         .context("failed to extract tarball")?;
 
     let _ = std::fs::remove_file(tmp);
 
     if !output.status.success() {
-        anyhow::bail!("extraction failed: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     println!();
-    println!("{} Monolith v{} installed to {install_dir}", "✓".green(), tag.bold());
+    println!(
+        "{} Monolith v{} installed to {install_dir}",
+        "✓".green(),
+        tag.bold()
+    );
     println!("{} Post-update snapshot...", "→".blue());
     let _ = Command::new("snapper")
-        .args(["create", "--description", &format!("post-mnpkg-self-update-{tag}"), "--type", "post"])
+        .args([
+            "create",
+            "--description",
+            &format!("post-mnpkg-self-update-{tag}"),
+            "--type",
+            "post",
+        ])
         .output();
 
     Ok(())
@@ -742,8 +788,14 @@ fn show_history() -> Result<()> {
 fn repo_init(path: &str, name: &str) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("failed to create {path}"))?;
     println!("{} Repo directory ready at {path}", "●".green());
-    println!("  {} Add packages: mnpkg repo add {path} <file.pkg.tar.zst>", "→".blue());
-    println!("  {} Then, on other machines, add to /etc/pacman.conf:", "→".blue());
+    println!(
+        "  {} Add packages: mnpkg repo add {path} <file.pkg.tar.zst>",
+        "→".blue()
+    );
+    println!(
+        "  {} Then, on other machines, add to /etc/pacman.conf:",
+        "→".blue()
+    );
     println!();
     repo_snippet(&format!("file://{path}"), name);
     Ok(())
@@ -758,7 +810,9 @@ fn repo_package_files(path: &str) -> Result<Vec<String>> {
         .map(|e| e.path())
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.ends_with(".pkg.tar.zst") || name.ends_with(".pkg.tar.xz") || name.ends_with(".pkg.tar.gz")
+            name.ends_with(".pkg.tar.zst")
+                || name.ends_with(".pkg.tar.xz")
+                || name.ends_with(".pkg.tar.gz")
         })
         .map(|p| p.to_string_lossy().to_string())
         .collect();
@@ -785,7 +839,11 @@ fn run_repo_add(path: &str, name: &str) -> Result<()> {
         anyhow::bail!("repo-add failed");
     }
 
-    println!("{} {name}.db.tar.gz rebuilt ({} package(s))", "●".green(), files.len());
+    println!(
+        "{} {name}.db.tar.gz rebuilt ({} package(s))",
+        "●".green(),
+        files.len()
+    );
     Ok(())
 }
 
@@ -797,10 +855,13 @@ fn repo_add(path: &str, packages: &[String], name: &str) -> Result<()> {
         if !src.exists() {
             anyhow::bail!("package file not found: {pkg}");
         }
-        let filename = src.file_name().ok_or_else(|| anyhow::anyhow!("bad package path: {pkg}"))?;
+        let filename = src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("bad package path: {pkg}"))?;
         let dest = std::path::Path::new(path).join(filename);
         if src.canonicalize().ok() != dest.canonicalize().ok() {
-            std::fs::copy(src, &dest).with_context(|| format!("failed to copy {pkg} into {path}"))?;
+            std::fs::copy(src, &dest)
+                .with_context(|| format!("failed to copy {pkg} into {path}"))?;
         }
         println!("  {} {}", "●".green(), filename.to_string_lossy());
     }
@@ -821,8 +882,10 @@ fn repo_serve(path: &str, port: u16) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
-    let root = std::fs::canonicalize(path).with_context(|| format!("repo directory not found: {path}"))?;
-    let listener = TcpListener::bind(("0.0.0.0", port)).with_context(|| format!("failed to bind port {port}"))?;
+    let root =
+        std::fs::canonicalize(path).with_context(|| format!("repo directory not found: {path}"))?;
+    let listener = TcpListener::bind(("0.0.0.0", port))
+        .with_context(|| format!("failed to bind port {port}"))?;
     println!("{} Serving {} on http://0.0.0.0:{port}/", "●".green(), path);
     println!("  {} Ctrl+C to stop", "→".blue());
 
@@ -847,7 +910,9 @@ fn repo_serve(path: &str, port: u16) -> Result<()> {
         let requested = urlencoding_decode(requested);
 
         let candidate = root.join(&requested);
-        let resolved = std::fs::canonicalize(&candidate).ok().filter(|p| p.starts_with(&root) && p.is_file());
+        let resolved = std::fs::canonicalize(&candidate)
+            .ok()
+            .filter(|p| p.starts_with(&root) && p.is_file());
 
         match resolved {
             Some(file_path) => {
@@ -859,11 +924,14 @@ fn repo_serve(path: &str, port: u16) -> Result<()> {
                     let _ = stream.write_all(header.as_bytes());
                     let _ = std::io::copy(&mut file, &mut stream);
                 } else {
-                    let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n",
+                    );
                 }
             }
             None => {
-                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nnot found");
+                let _ = stream
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nnot found");
             }
         }
     }

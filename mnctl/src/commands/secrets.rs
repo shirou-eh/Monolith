@@ -59,12 +59,22 @@ enum SecretsCommand {
 impl SecretsArgs {
     pub async fn run(self) -> Result<()> {
         match self.command {
-            SecretsCommand::Init { name, key, value } => secrets_init(&name, key.as_deref(), value.as_deref()),
+            SecretsCommand::Init { name, key, value } => {
+                secrets_init(&name, key.as_deref(), value.as_deref())
+            }
             SecretsCommand::List => secrets_list(),
             SecretsCommand::Show { name, key } => secrets_show(&name, key.as_deref()),
-            SecretsCommand::Encrypt { name, tpm, yubikey, age_key } => {
-                secrets_encrypt(&name, tpm.as_deref(), yubikey.as_deref(), age_key.as_deref())
-            }
+            SecretsCommand::Encrypt {
+                name,
+                tpm,
+                yubikey,
+                age_key,
+            } => secrets_encrypt(
+                &name,
+                tpm.as_deref(),
+                yubikey.as_deref(),
+                age_key.as_deref(),
+            ),
             SecretsCommand::Decrypt { name } => secrets_decrypt(&name),
             SecretsCommand::Export { name } => secrets_export(&name),
         }
@@ -88,9 +98,16 @@ fn secrets_init(name: &str, key: Option<&str>, value: Option<&str>) -> Result<()
             println!("  {} Secrets for '{}' already exist", "●".yellow(), name);
             return Ok(());
         }
-        std::fs::write(&env_path, "# Monolith Secrets — edit with `mnctl secrets decrypt`\n")?;
+        std::fs::write(
+            &env_path,
+            "# Monolith Secrets — edit with `mnctl secrets decrypt`\n",
+        )?;
         println!("  {} Secrets initialized for '{}'", "●".green(), name);
-        println!("  {} Add keys: mnctl secrets init {} KEY [value]", "→".blue(), name);
+        println!(
+            "  {} Add keys: mnctl secrets init {} KEY [value]",
+            "→".blue(),
+            name
+        );
         println!("  {} Encrypt:  mnctl secrets encrypt {}", "→".blue(), name);
         return Ok(());
     }
@@ -114,7 +131,10 @@ fn secrets_init(name: &str, key: Option<&str>, value: Option<&str>) -> Result<()
 
     // Replace existing key or append
     let key_line = format!("{k}=");
-    if content.lines().any(|l| l.starts_with(&key_line) || l.trim_start().starts_with(&key_line)) {
+    if content
+        .lines()
+        .any(|l| l.starts_with(&key_line) || l.trim_start().starts_with(&key_line))
+    {
         let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
         for line in &mut lines {
             if line.starts_with(&key_line) || line.trim_start().starts_with(&key_line) {
@@ -149,7 +169,11 @@ fn secrets_list() -> Result<()> {
         if entry.file_type()?.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
             let encrypted = Path::new(&format!("{dir}/{name}/.env.age")).exists();
-            let status = if encrypted { "encrypted".green() } else { "plaintext".yellow() };
+            let status = if encrypted {
+                "encrypted".green()
+            } else {
+                "plaintext".yellow()
+            };
             println!("  {} {:<30} {}", "●".green(), name, status);
         }
     }
@@ -178,8 +202,10 @@ fn secrets_show(name: &str, key: Option<&str>) -> Result<()> {
     match key {
         Some(k) => {
             for line in content.lines() {
-                if line.starts_with(&format!("{k}=")) || line.trim_start().starts_with(&format!("{k}=")) {
-                    let val = line.splitn(2, '=').nth(1).unwrap_or("");
+                if line.starts_with(&format!("{k}="))
+                    || line.trim_start().starts_with(&format!("{k}="))
+                {
+                    let val = line.split_once('=').map(|x| x.1).unwrap_or("");
                     println!("{}={}", k.bold(), val);
                     return Ok(());
                 }
@@ -190,7 +216,7 @@ fn secrets_show(name: &str, key: Option<&str>) -> Result<()> {
             println!("{} Secrets for '{}':", "≡".blue(), name.bold());
             for line in content.lines() {
                 if line.contains('=') && !line.starts_with('#') {
-                    let k = line.splitn(2, '=').next().unwrap_or("");
+                    let k = line.split('=').next().unwrap_or("");
                     println!("  {} = ***", k.bold());
                 }
             }
@@ -199,12 +225,21 @@ fn secrets_show(name: &str, key: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn secrets_encrypt(name: &str, tpm: Option<&str>, yubikey: Option<&str>, age_key: Option<&str>) -> Result<()> {
+fn secrets_encrypt(
+    name: &str,
+    tpm: Option<&str>,
+    yubikey: Option<&str>,
+    age_key: Option<&str>,
+) -> Result<()> {
     let env_path = format!("{}/{}/.env", secrets_dir(), name);
     let encrypted_path = format!("{}/{}/.env.age", secrets_dir(), name);
 
     if !Path::new(&env_path).exists() {
-        anyhow::bail!(".env not found for '{}'. Run `mnctl secrets init {}` first", name, name);
+        anyhow::bail!(
+            ".env not found for '{}'. Run `mnctl secrets init {}` first",
+            name,
+            name
+        );
     }
 
     let age_bin = which::which("age").ok();
@@ -254,7 +289,14 @@ fn secrets_encrypt(name: &str, tpm: Option<&str>, yubikey: Option<&str>, age_key
     };
 
     let status = Command::new("age")
-        .args(["--encrypt", "--recipient", &recipient, "-o", &encrypted_path, &env_path])
+        .args([
+            "--encrypt",
+            "--recipient",
+            &recipient,
+            "-o",
+            &encrypted_path,
+            &env_path,
+        ])
         .status()
         .context("age encryption failed")?;
 
@@ -270,7 +312,7 @@ fn secrets_encrypt(name: &str, tpm: Option<&str>, yubikey: Option<&str>, age_key
 }
 
 fn secrets_decrypt(name: &str) -> Result<()> {
-    let env_path = format!("{}/{}/.env", secrets_dir(), name);
+    let _env_path = format!("{}/{}/.env", secrets_dir(), name);
     let encrypted_path = format!("{}/{}/.env.age", secrets_dir(), name);
 
     if !Path::new(&encrypted_path).exists() {

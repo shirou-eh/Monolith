@@ -293,10 +293,7 @@ struct ContainerRow {
 
 async fn api_containers() -> Json<Vec<ContainerRow>> {
     // Detect runtime by checking which socket is present
-    let bins: &[(&str, &str)] = &[
-        ("docker", "docker"),
-        ("podman", "podman"),
-    ];
+    let bins: &[(&str, &str)] = &[("docker", "docker"), ("podman", "podman")];
     for (bin, runtime_name) in bins {
         let sock_exists = match *runtime_name {
             "podman" => std::path::Path::new("/run/podman/podman.sock").exists(),
@@ -456,11 +453,14 @@ struct LogsResponse {
 #[derive(Debug, Deserialize)]
 struct MetricsExportQuery {
     format: Option<String>,
-    since: Option<String>,
+    // No `since` here (unlike `mnctl monitor logs --since`) — this
+    // endpoint exports a live instantaneous snapshot, not a historical
+    // series, so a time filter has nothing to apply to. A prior version
+    // of this struct carried an unused `since` field left over from
+    // copy-pasting the logs query shape.
 }
 
 async fn api_metrics_export(Query(query): Query<MetricsExportQuery>) -> Response {
-
     let mut sys = System::new_all();
     sys.refresh_all();
 

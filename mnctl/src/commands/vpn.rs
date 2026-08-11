@@ -290,10 +290,10 @@ fn vpn_peer_qr(name: &str) -> Result<()> {
         println!("    mnpkg install qrencode");
         println!();
         println!("    # Or print config manually:");
-        println!("    cat {}", &peer_cfg);
+        println!("    cat {}", peer_cfg);
         println!();
         println!("    # Pipe to qrencode:");
-        println!("    cat {} | qrencode -t ANSIUTF8", &peer_cfg);
+        println!("    cat {} | qrencode -t ANSIUTF8", peer_cfg);
     }
 
     println!();

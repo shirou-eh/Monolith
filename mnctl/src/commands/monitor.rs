@@ -220,16 +220,6 @@ fn system_status() -> Result<()> {
     Ok(())
 }
 
-fn system_top() -> Result<()> {
-    let status = Command::new("top")
-        .args(["-b", "-n", "1", "-o", "%CPU"])
-        .output()
-        .context("failed to run top")?;
-
-    print!("{}", String::from_utf8_lossy(&status.stdout));
-    Ok(())
-}
-
 fn services_resources() -> Result<()> {
     let output = Command::new("systemctl")
         .args([
@@ -452,27 +442,52 @@ fn monitor_anomaly(metric: &str, reset: bool) -> Result<()> {
     // Collect current value
     let current = match metric {
         "cpu" => {
-            let stat = std::fs::read_to_string("/proc/stat")
-                .context("failed to read /proc/stat")?;
+            let stat =
+                std::fs::read_to_string("/proc/stat").context("failed to read /proc/stat")?;
             let line = stat.lines().next().unwrap_or("");
-            let parts: Vec<f64> = line.split_whitespace()
+            let parts: Vec<f64> = line
+                .split_whitespace()
                 .skip(1)
                 .filter_map(|s| s.parse().ok())
                 .collect();
             if parts.len() >= 5 {
                 let total: f64 = parts.iter().sum();
                 let idle = parts[3];
-                if total > 0.0 { (total - idle) / total * 100.0 } else { 0.0 }
-            } else { 0.0 }
+                if total > 0.0 {
+                    (total - idle) / total * 100.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
         }
         "mem" => {
-            let info = std::fs::read_to_string("/proc/meminfo")
-                .context("failed to read /proc/meminfo")?;
-            let total_line = info.lines().find(|l| l.starts_with("MemTotal:")).unwrap_or("");
-            let avail_line = info.lines().find(|l| l.starts_with("MemAvailable:")).unwrap_or("");
-            let total_kb: f64 = total_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1.0);
-            let avail_kb: f64 = avail_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            if total_kb > 0.0 { (1.0 - avail_kb / total_kb) * 100.0 } else { 0.0 }
+            let info =
+                std::fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
+            let total_line = info
+                .lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .unwrap_or("");
+            let avail_line = info
+                .lines()
+                .find(|l| l.starts_with("MemAvailable:"))
+                .unwrap_or("");
+            let total_kb: f64 = total_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
+            let avail_kb: f64 = avail_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            if total_kb > 0.0 {
+                (1.0 - avail_kb / total_kb) * 100.0
+            } else {
+                0.0
+            }
         }
         "disk" => {
             let usage = std::process::Command::new("df")
@@ -480,14 +495,16 @@ fn monitor_anomaly(metric: &str, reset: bool) -> Result<()> {
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_default();
-            usage.lines().nth(1)
+            usage
+                .lines()
+                .nth(1)
                 .and_then(|l| l.split_whitespace().nth(4))
                 .and_then(|s| s.trim_end_matches('%').parse().ok())
                 .unwrap_or(0.0)
         }
         "net" => {
-            let dev = std::fs::read_to_string("/proc/net/dev")
-                .context("failed to read /proc/net/dev")?;
+            let dev =
+                std::fs::read_to_string("/proc/net/dev").context("failed to read /proc/net/dev")?;
             // Sum bytes across all interfaces
             let mut total: f64 = 0.0;
             for line in dev.lines().skip(2) {
@@ -504,10 +521,13 @@ fn monitor_anomaly(metric: &str, reset: bool) -> Result<()> {
             total / 1_000_000.0 // MB
         }
         "load" => {
-            let load = std::fs::read_to_string("/proc/loadavg")
-                .context("failed to read /proc/loadavg")?;
+            let load =
+                std::fs::read_to_string("/proc/loadavg").context("failed to read /proc/loadavg")?;
             let parts: Vec<&str> = load.split_whitespace().collect();
-            parts.first().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+            parts
+                .first()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
         }
         _ => anyhow::bail!("unknown metric: {metric} (use: cpu, mem, disk, net, load)"),
     };
@@ -536,7 +556,8 @@ fn monitor_anomaly(metric: &str, reset: bool) -> Result<()> {
     // Build baseline from history if we have enough data
     let should_warn = if history.len() >= 20 {
         let mean: f64 = history.iter().sum::<f64>() / history.len() as f64;
-        let variance: f64 = history.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / history.len() as f64;
+        let variance: f64 =
+            history.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / history.len() as f64;
         let std_dev = variance.sqrt();
         let threshold = mean + 2.0 * std_dev;
         current > threshold
@@ -548,17 +569,28 @@ fn monitor_anomaly(metric: &str, reset: bool) -> Result<()> {
     println!("  Current:  {:>8.1}", current);
     if history.len() >= 20 {
         let mean: f64 = history.iter().sum::<f64>() / history.len() as f64;
-        let variance: f64 = history.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / history.len() as f64;
+        let variance: f64 =
+            history.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / history.len() as f64;
         let std_dev = variance.sqrt();
         let threshold = mean + 2.0 * std_dev;
-        println!("  Baseline: {:>8.1} (σ={:.1}, 2σ threshold={:.1})", mean, std_dev, threshold);
+        println!(
+            "  Baseline: {:>8.1} (σ={:.1}, 2σ threshold={:.1})",
+            mean, std_dev, threshold
+        );
         if should_warn {
-            println!("  {} ANOMALY — current value exceeds baseline threshold!", "⚠".red().bold());
+            println!(
+                "  {} ANOMALY — current value exceeds baseline threshold!",
+                "⚠".red().bold()
+            );
         } else {
             println!("  {} Normal (within baseline)", "●".green());
         }
     } else {
-        println!("  {} Collecting baseline... ({}/20 readings)", "●".cyan(), history.len());
+        println!(
+            "  {} Collecting baseline... ({}/20 readings)",
+            "●".cyan(),
+            history.len()
+        );
     }
 
     // Save baseline
@@ -574,7 +606,8 @@ fn monitor_anomaly(metric: &str, reset: bool) -> Result<()> {
 
     if history.len() >= 20 {
         let mean: f64 = history.iter().sum::<f64>() / history.len() as f64;
-        let variance: f64 = history.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / history.len() as f64;
+        let variance: f64 =
+            history.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / history.len() as f64;
         let std_dev = variance.sqrt();
         let threshold = mean + 2.0 * std_dev;
 
@@ -630,7 +663,10 @@ fn monitor_top(count: usize, history: bool) -> Result<()> {
             return Ok(());
         }
 
-        println!("{} Top processes — 24h history (ASCII sparklines)", "≡".blue().bold());
+        println!(
+            "{} Top processes — 24h history (ASCII sparklines)",
+            "≡".blue().bold()
+        );
         println!();
 
         // Sort by average CPU
@@ -638,18 +674,33 @@ fn monitor_top(count: usize, history: bool) -> Result<()> {
         sorted.sort_by(|a, b| {
             let avg_a = a.1.iter().sum::<f64>() / a.1.len() as f64;
             let avg_b = b.1.iter().sum::<f64>() / b.1.len() as f64;
-            avg_b.partial_cmp(&avg_a).unwrap_or(std::cmp::Ordering::Equal)
+            avg_b
+                .partial_cmp(&avg_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         for (name, samples) in sorted.iter().take(count) {
             let avg = samples.iter().sum::<f64>() / samples.len() as f64;
-            let max = samples.iter().cloned().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0.0);
-            let min = samples.iter().cloned().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0.0);
+            let max = samples
+                .iter()
+                .cloned()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(0.0);
+            let min = samples
+                .iter()
+                .cloned()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(0.0);
 
             let sparkline = sparkline(samples, 20);
-            println!("  {:<20} {} {:>5.1}% avg {:>5.1}% max {:>5.1}% min",
+            println!(
+                "  {:<20} {} {:>5.1}% avg {:>5.1}% max {:>5.1}% min",
                 name.chars().take(20).collect::<String>(),
-                sparkline, avg, max, min);
+                sparkline,
+                avg,
+                max,
+                min
+            );
         }
     } else {
         let output = std::process::Command::new("ps")
@@ -659,7 +710,7 @@ fn monitor_top(count: usize, history: bool) -> Result<()> {
         let content = String::from_utf8_lossy(&output.stdout).to_string();
 
         println!("{} Top {} processes", "≡".blue(), count);
-        println!("  {:<8} {:<6} {:<6}  {}", "PID", "CPU%", "MEM%", "COMMAND");
+        println!("  {:<8} {:<6} {:<6}  COMMAND", "PID", "CPU%", "MEM%");
         for line in content.lines().skip(1).take(count) {
             println!("  {line}");
         }
@@ -673,7 +724,11 @@ fn sparkline(values: &[f64], width: usize) -> String {
         return "│ │".to_string();
     }
 
-    let max = values.iter().cloned().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(1.0);
+    let max = values
+        .iter()
+        .cloned()
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(1.0);
     if max == 0.0 {
         return "│ │".to_string();
     }
@@ -689,11 +744,14 @@ fn sparkline(values: &[f64], width: usize) -> String {
         values.to_vec()
     };
 
-    let result: String = sampled.iter().map(|v| {
-        let normalized = (v / max * 7.0).floor() as usize;
-        let idx = normalized.min(7);
-        chars[idx]
-    }).collect();
+    let result: String = sampled
+        .iter()
+        .map(|v| {
+            let normalized = (v / max * 7.0).floor() as usize;
+            let idx = normalized.min(7);
+            chars[idx]
+        })
+        .collect();
 
     format!("│{}│", result)
 }
@@ -732,7 +790,8 @@ fn export_metrics(format: &str, out: Option<&str>) -> Result<()> {
         total: u64,
         pct: f64,
     }
-    let disks: Vec<DiskEntry> = sysinfo::Disks::new().list()
+    let disks: Vec<DiskEntry> = sysinfo::Disks::new()
+        .list()
         .iter()
         .map(|d| {
             let total = d.total_space();
@@ -754,7 +813,13 @@ fn export_metrics(format: &str, out: Option<&str>) -> Result<()> {
 
     // Count active systemd services.
     let active_services = Command::new("systemctl")
-        .args(["--no-pager", "--no-legend", "-t", "service", "--state=active"])
+        .args([
+            "--no-pager",
+            "--no-legend",
+            "-t",
+            "service",
+            "--state=active",
+        ])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
         .unwrap_or(0);
@@ -886,16 +951,28 @@ fn render_prometheus_metrics() -> String {
 
     out.push_str("# HELP monolith_cluster_peers_configured Peer nodes listed in this host's cluster config.\n");
     out.push_str("# TYPE monolith_cluster_peers_configured gauge\n");
-    out.push_str(&format!("monolith_cluster_peers_configured {}\n", cluster_peer_count()));
+    out.push_str(&format!(
+        "monolith_cluster_peers_configured {}\n",
+        cluster_peer_count()
+    ));
 
     out.push_str("# HELP monolith_security_anomaly_baseline Learned EWMA baseline from `mnctl security anomaly` (warning+ lines/window).\n");
     out.push_str("# TYPE monolith_security_anomaly_baseline gauge\n");
-    out.push_str(&format!("monolith_security_anomaly_baseline {:.4}\n", security_anomaly_baseline()));
+    out.push_str(&format!(
+        "monolith_security_anomaly_baseline {:.4}\n",
+        security_anomaly_baseline()
+    ));
 
-    out.push_str("# HELP monolith_autobalance_jobs_total Cluster autobalance jobs dispatched, by outcome.\n");
+    out.push_str(
+        "# HELP monolith_autobalance_jobs_total Cluster autobalance jobs dispatched, by outcome.\n",
+    );
     out.push_str("# TYPE monolith_autobalance_jobs_total counter\n");
-    out.push_str(&format!("monolith_autobalance_jobs_total{{status=\"ok\"}} {ok}\n"));
-    out.push_str(&format!("monolith_autobalance_jobs_total{{status=\"failed\"}} {failed}\n"));
+    out.push_str(&format!(
+        "monolith_autobalance_jobs_total{{status=\"ok\"}} {ok}\n"
+    ));
+    out.push_str(&format!(
+        "monolith_autobalance_jobs_total{{status=\"failed\"}} {failed}\n"
+    ));
 
     out.push_str("# HELP monolith_load1 1-minute load average.\n");
     out.push_str("# TYPE monolith_load1 gauge\n");
@@ -913,7 +990,10 @@ fn monitor_exporter(port: u16) -> Result<()> {
 
     let listener = TcpListener::bind(("0.0.0.0", port))
         .with_context(|| format!("failed to bind exporter port {port}"))?;
-    println!("{} Monolith exporter listening on :{port}/metrics", "●".green());
+    println!(
+        "{} Monolith exporter listening on :{port}/metrics",
+        "●".green()
+    );
 
     for stream in listener.incoming() {
         let mut stream = match stream {

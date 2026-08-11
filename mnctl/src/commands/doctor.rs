@@ -62,10 +62,19 @@ fn run_doctor(fix: bool) -> Result<()> {
     if problems == 0 {
         println!("{}", "No problems found.".green().bold());
     } else {
-        println!("{}", format!("{problems} issue(s) found — see fix hints above.").yellow().bold());
+        println!(
+            "{}",
+            format!("{problems} issue(s) found — see fix hints above.")
+                .yellow()
+                .bold()
+        );
         if fix {
             println!();
-            println!("{}", "--fix only auto-applies checks marked [auto-fixable] below; none were this run.".dimmed());
+            println!(
+                "{}",
+                "--fix only auto-applies checks marked [auto-fixable] below; none were this run."
+                    .dimmed()
+            );
         }
     }
     Ok(())
@@ -77,8 +86,16 @@ fn check_os_release() -> Check {
     Check {
         name: "os-release branding",
         ok,
-        detail: if ok { "Monolith OS identified correctly".to_string() } else { "system reports as something other than Monolith".to_string() },
-        fix_hint: if ok { None } else { Some("mnctl was shipped without writing /etc/os-release on install — reinstall or copy iso/airootfs/etc/os-release manually".to_string()) },
+        detail: if ok {
+            "Monolith OS identified correctly".to_string()
+        } else {
+            "system reports as something other than Monolith".to_string()
+        },
+        fix_hint: if ok {
+            None
+        } else {
+            Some("mnctl was shipped without writing /etc/os-release on install — reinstall or copy iso/airootfs/etc/os-release manually".to_string())
+        },
     }
 }
 
@@ -130,29 +147,66 @@ fn check_disk_space() -> Check {
                 name: "root disk space",
                 ok,
                 detail: format!("{pct}% used"),
-                fix_hint: if ok { None } else { Some("mnctl backup / snapper snapshots eat space over time — check: snapper list, mnpkg orphans".to_string()) },
+                fix_hint: if ok {
+                    None
+                } else {
+                    Some("mnctl backup / snapper snapshots eat space over time — check: snapper list, mnpkg orphans".to_string())
+                },
             }
         }
-        _ => Check { name: "root disk space", ok: false, detail: "couldn't run df".to_string(), fix_hint: None },
+        _ => Check {
+            name: "root disk space",
+            ok: false,
+            detail: "couldn't run df".to_string(),
+            fix_hint: None,
+        },
     }
 }
 
 fn check_failed_services() -> Check {
-    let output = Command::new("systemctl").args(["list-units", "--type=service", "--state=failed", "--no-legend", "--plain"]).output();
+    let output = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--type=service",
+            "--state=failed",
+            "--no-legend",
+            "--plain",
+        ])
+        .output();
     match output {
         Ok(o) if o.status.success() => {
-            let failed: Vec<&str> = String::from_utf8_lossy(&o.stdout).lines().map(|_| "x").collect();
+            let failed: Vec<&str> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|_| "x")
+                .collect();
             let text = String::from_utf8_lossy(&o.stdout).to_string();
-            let names: Vec<String> = text.lines().filter_map(|l| l.split_whitespace().next()).map(|s| s.to_string()).collect();
+            let names: Vec<String> = text
+                .lines()
+                .filter_map(|l| l.split_whitespace().next())
+                .map(|s| s.to_string())
+                .collect();
             let ok = failed.is_empty();
             Check {
                 name: "failed services",
                 ok,
-                detail: if ok { "none".to_string() } else { format!("{}: {}", failed.len(), names.join(", ")) },
-                fix_hint: if ok { None } else { Some("systemctl reset-failed <unit> && systemctl restart <unit> — check journalctl -u <unit> first".to_string()) },
+                detail: if ok {
+                    "none".to_string()
+                } else {
+                    format!("{}: {}", failed.len(), names.join(", "))
+                },
+                fix_hint: if ok {
+                    None
+                } else {
+                    Some("systemctl reset-failed <unit> && systemctl restart <unit> — check journalctl -u <unit> first".to_string())
+                },
             }
         }
-        _ => Check { name: "failed services", ok: false, detail: "couldn't query systemctl".to_string(), fix_hint: None },
+        _ => Check {
+            name: "failed services",
+            ok: false,
+            detail: "couldn't query systemctl".to_string(),
+            fix_hint: None,
+        },
     }
 }
 
@@ -162,7 +216,11 @@ fn check_cluster_config() -> Check {
     Check {
         name: "cluster config",
         ok: true, // not being in a cluster isn't a problem by itself
-        detail: if exists { "this host is in a cluster".to_string() } else { "not in a cluster (fine if standalone)".to_string() },
+        detail: if exists {
+            "this host is in a cluster".to_string()
+        } else {
+            "not in a cluster (fine if standalone)".to_string()
+        },
         fix_hint: None,
     }
 }
@@ -172,8 +230,16 @@ fn check_snapper() -> Check {
     Check {
         name: "snapper",
         ok,
-        detail: if ok { "installed — snapshots available for update/kernel/react safety nets".to_string() } else { "not installed".to_string() },
-        fix_hint: if ok { None } else { Some("mnpkg install snapper — several commands (update, security react, kernel install) snapshot on a best-effort basis and silently skip it otherwise".to_string()) },
+        detail: if ok {
+            "installed — snapshots available for update/kernel/react safety nets".to_string()
+        } else {
+            "not installed".to_string()
+        },
+        fix_hint: if ok {
+            None
+        } else {
+            Some("mnpkg install snapper — several commands (update, security react, kernel install) snapshot on a best-effort basis and silently skip it otherwise".to_string())
+        },
     }
 }
 
@@ -191,7 +257,12 @@ fn check_journal_size() -> Check {
                 fix_hint: None,
             }
         }
-        _ => Check { name: "journal disk usage", ok: true, detail: "couldn't query".to_string(), fix_hint: None },
+        _ => Check {
+            name: "journal disk usage",
+            ok: true,
+            detail: "couldn't query".to_string(),
+            fix_hint: None,
+        },
     }
 }
 

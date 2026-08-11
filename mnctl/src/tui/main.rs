@@ -28,8 +28,6 @@ struct NetIfaceInfo {
     ip: String,
     rx_bytes: u64,
     tx_bytes: u64,
-    rx_packets: u64,
-    tx_packets: u64,
     rx_errors: u64,
     tx_errors: u64,
     is_up: bool,
@@ -232,8 +230,6 @@ impl App {
                 ip: iface_ip(name),
                 rx_bytes: data.total_received(),
                 tx_bytes: data.total_transmitted(),
-                rx_packets: data.total_packets_received(),
-                tx_packets: data.total_packets_transmitted(),
                 rx_errors: data.total_errors_on_received(),
                 tx_errors: data.total_errors_on_transmitted(),
                 is_up: std::fs::read_to_string(format!("/sys/class/net/{name}/operstate"))
@@ -255,8 +251,10 @@ impl App {
         self.net_ifaces = merged;
 
         // Update sparkline histories (index by position)
-        self.rx_history.resize(self.net_ifaces.len(), vec![0u64; 60]);
-        self.tx_history.resize(self.net_ifaces.len(), vec![0u64; 60]);
+        self.rx_history
+            .resize(self.net_ifaces.len(), vec![0u64; 60]);
+        self.tx_history
+            .resize(self.net_ifaces.len(), vec![0u64; 60]);
         for (i, iface) in self.net_ifaces.iter().enumerate() {
             if iface.is_up {
                 self.rx_history[i].push(iface.rx_bytes / 1024); // KB
@@ -293,12 +291,12 @@ impl App {
             KeyCode::Char('c') => self.active_tab = 1,
             KeyCode::Char('n') => self.active_tab = 2,
             KeyCode::Char('l') => self.active_tab = 3,
-                KeyCode::Char('a') => self.active_tab = 4,
-                KeyCode::Char('1') => self.active_tab = 0,
-                KeyCode::Char('2') => self.active_tab = 1,
-                KeyCode::Char('3') => self.active_tab = 2,
-                KeyCode::Char('4') => self.active_tab = 3,
-                KeyCode::Char('5') => self.active_tab = 4,
+            KeyCode::Char('a') => self.active_tab = 4,
+            KeyCode::Char('1') => self.active_tab = 0,
+            KeyCode::Char('2') => self.active_tab = 1,
+            KeyCode::Char('3') => self.active_tab = 2,
+            KeyCode::Char('4') => self.active_tab = 3,
+            KeyCode::Char('5') => self.active_tab = 4,
             _ => {}
         }
     }
@@ -424,7 +422,11 @@ fn ui(f: &mut Frame, app: &App) {
         " MONOLITH  |  {}  |  Kernel {}  |  {} {}d {}h {}m  |  v{}",
         hostname,
         kernel,
-        if l.header_up == "UP" { "Up" } else { "Работает" },
+        if l.header_up == "UP" {
+            "Up"
+        } else {
+            "Работает"
+        },
         days,
         hours,
         mins,
@@ -567,19 +569,13 @@ fn render_system_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
         let io_str = if app.tick_count > 1 && app.disk_io.len() >= 2 && app.disk_io_prev.len() >= 2
         {
             // Match device name with /proc/diskstats entry
-            let short = dev_name
-                .trim_start_matches("/dev/")
-                .trim_start_matches('/');
-            let prev_io = app
-                .disk_io_prev
-                .iter()
-                .find(|d| d.name == short);
+            let short = dev_name.trim_start_matches("/dev/").trim_start_matches('/');
+            let prev_io = app.disk_io_prev.iter().find(|d| d.name == short);
             let curr_io = app.disk_io.iter().find(|d| d.name == short);
             match (prev_io, curr_io) {
                 (Some(prev), Some(curr)) => {
-                    let r_rate = (curr.read_bytes.saturating_sub(prev.read_bytes)) as f64
-                        / 1024.0
-                        / 1024.0;
+                    let r_rate =
+                        (curr.read_bytes.saturating_sub(prev.read_bytes)) as f64 / 1024.0 / 1024.0;
                     let w_rate = (curr.write_bytes.saturating_sub(prev.write_bytes)) as f64
                         / 1024.0
                         / 1024.0;
@@ -597,11 +593,8 @@ fn render_system_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
             io_str
         )));
     }
-    let disk_list = List::new(disk_items).block(
-        Block::default()
-            .title(l.disks)
-            .borders(Borders::ALL),
-    );
+    let disk_list =
+        List::new(disk_items).block(Block::default().title(l.disks).borders(Borders::ALL));
     f.render_widget(disk_list, center_chunks[0]);
 
     let mut proc_items: Vec<(&sysinfo::Pid, &sysinfo::Process)> =
@@ -624,15 +617,22 @@ fn render_system_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
             ))
         })
         .collect();
-    let proc_list = List::new(top_procs).block(
-        Block::default()
-            .title(l.top_procs)
-            .borders(Borders::ALL),
-    );
+    let proc_list =
+        List::new(top_procs).block(Block::default().title(l.top_procs).borders(Borders::ALL));
     f.render_widget(proc_list, center_chunks[1]);
 
     // Right panel — Status summary
-    let status_text = " Services: checking...\n\n Alerts: none\n\n Last backup: N/A";
+    let tunnels_configured = std::path::Path::new("/etc/monolith/playit-secret").exists()
+        || std::path::Path::new("/etc/monolith/cloudflare-token").exists();
+    let tunnels_line = if tunnels_configured {
+        "configured"
+    } else {
+        l.no_active_tunnels
+    };
+    let status_text = format!(
+        " Services: checking...\n\n Alerts: none\n\n Last backup: {}\n\n Tunnels: {tunnels_line}",
+        l.not_available
+    );
     let status_widget =
         Paragraph::new(status_text).block(Block::default().title(l.status).borders(Borders::ALL));
     f.render_widget(status_widget, chunks[2]);
@@ -641,28 +641,22 @@ fn render_system_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
 fn render_containers_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
     if app.containers.is_empty() {
         let runtime = detect_container_runtime().unwrap_or_else(|| "docker/podman".to_string());
-        let msg = match l.tabs[0].as_ref() {
-            "Система" => format!(
-                " Контейнеров не найдено (runtime: {runtime})\n\n \
-                 Запустите: mnctl container start <name>"
-            ),
-            _ => format!(
-                " No containers found (runtime: {runtime})\n\n \
-                 Start a container with: mnctl container start <name>"
-            ),
+        let hint = match l.tabs[0] {
+            "Система" => "Запустите: mnctl container start <name>",
+            _ => "Start a container with: mnctl container start <name>",
         };
-        let widget = Paragraph::new(msg)
-            .block(Block::default().title(l.containers).borders(Borders::ALL));
+        let msg = format!(" {} (runtime: {runtime})\n\n {hint}", l.no_containers);
+        let widget =
+            Paragraph::new(msg).block(Block::default().title(l.containers).borders(Borders::ALL));
         f.render_widget(widget, area);
         return;
     }
 
-    let header_txt = match l.tabs[0].as_ref() {
+    let header_txt = match l.tabs[0] {
         "Система" => format!(" {:<25} {:<30} {}", "ИМЯ", "ОБРАЗ", "СТАТУС"),
         _ => format!(" {:<25} {:<30} {}", "NAME", "IMAGE", "STATUS"),
     };
-    let header = ListItem::new(header_txt)
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let header = ListItem::new(header_txt).style(Style::default().add_modifier(Modifier::BOLD));
 
     let mut items = vec![header];
     for c in &app.containers {
@@ -678,7 +672,11 @@ fn render_containers_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
 
     let list = List::new(items).block(
         Block::default()
-            .title(format!("{} ({}) ", l.containers.trim(), app.containers.len()))
+            .title(format!(
+                "{} ({}) ",
+                l.containers.trim(),
+                app.containers.len()
+            ))
             .borders(Borders::ALL),
     );
     f.render_widget(list, area);
@@ -696,13 +694,13 @@ fn render_network_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
 
     // Network interfaces with per-interface RX/TX sparklines
     let num = app.net_ifaces.len();
-    let iface_height = (num + 1) * 3 + 2; // header + data rows + borders
+    let _iface_height = (num + 1) * 3 + 2; // header + data rows + borders
     let row_height = 6usize; // name+ip row + sparkline row
 
     let mut rows = Vec::with_capacity(num.max(1) * row_height);
 
     // Header
-    let (iface_lbl, ip_lbl, rx_lbl, tx_lbl, state_lbl) = match l.tabs[0].as_ref() {
+    let (iface_lbl, ip_lbl, rx_lbl, tx_lbl, state_lbl) = match l.tabs[0] {
         "Система" => ("ИНТЕРФЕЙС", "IP", "RX (всего)", "TX (всего)", "СОСТ."),
         _ => ("INTERFACE", "IP", "RX (total)", "TX (total)", "STATE"),
     };
@@ -716,24 +714,34 @@ fn render_network_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
 
     for (i, iface) in app.net_ifaces.iter().enumerate() {
         let state = if iface.is_up {
-            "UP".to_string()
+            l.header_up
         } else {
-            "DOWN".to_string()
-        };
+            l.header_down
+        }
+        .to_string();
         let name_fmt = if iface.is_up {
             format!(" {}", iface.name)
         } else {
-            format!(" {} {}", "↓".to_string(), iface.name)
+            format!(" {} {}", "↓", iface.name)
         };
-        let style = if iface.is_up {
+        let has_errors = iface.rx_errors > 0 || iface.tx_errors > 0;
+        let style = if has_errors {
+            Style::default().fg(Color::Red)
+        } else if iface.is_up {
             Style::default()
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
+        let err_suffix = if has_errors {
+            format!("  err rx:{} tx:{}", iface.rx_errors, iface.tx_errors)
+        } else {
+            String::new()
+        };
+
         rows.push(
             ListItem::new(format!(
-                " {:<18} {:<16} {:>10} MB {:>10} MB {:>6}",
+                " {:<18} {:<16} {:>10} MB {:>10} MB {:>6}{err_suffix}",
                 name_fmt,
                 iface.ip,
                 iface.rx_bytes / 1024 / 1024,
@@ -744,9 +752,9 @@ fn render_network_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
         );
 
         // Mini RX/TX sparkline
-        let rx_sample = app.rx_history[i].last().copied().unwrap_or(0);
-        let tx_sample = app.tx_history[i].last().copied().unwrap_or(0);
-        let (rx_prefix, tx_prefix) = match l.tabs[0].as_ref() {
+        let _rx_sample = app.rx_history[i].last().copied().unwrap_or(0);
+        let _tx_sample = app.tx_history[i].last().copied().unwrap_or(0);
+        let (rx_prefix, tx_prefix) = match l.tabs[0] {
             "Система" => ("ПРМ", "ПРД"),
             _ => ("RX", "TX"),
         };
@@ -783,7 +791,10 @@ fn render_network_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
         .split(chunks[1]);
 
     for (i, iface) in app.net_ifaces.iter().take(4).enumerate() {
-        let rx_data: Vec<u64> = app.rx_history[i].iter().map(|v| (*v).min(1024 * 1024)).collect();
+        let rx_data: Vec<u64> = app.rx_history[i]
+            .iter()
+            .map(|v| (*v).min(1024 * 1024))
+            .collect();
         let max_rx = *rx_data.iter().max().unwrap_or(&1).max(&1);
         let spark = Sparkline::default()
             .block(
@@ -823,11 +834,7 @@ fn render_logs_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
         .map(|line| ListItem::new(format!(" {line}")))
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(l.logs)
-            .borders(Borders::ALL),
-    );
+    let list = List::new(items).block(Block::default().title(l.logs).borders(Borders::ALL));
     f.render_widget(list, area);
 }
 
@@ -836,7 +843,8 @@ fn render_alerts_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
         .alerts
         .iter()
         .map(|alert| {
-            let style = if alert.starts_with("No active") || alert.starts_with("Нет активных") {
+            let style = if alert.starts_with("No active") || alert.starts_with("Нет активных")
+            {
                 Style::default().fg(Color::Green)
             } else {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
@@ -845,7 +853,10 @@ fn render_alerts_tab(f: &mut Frame, app: &App, area: Rect, l: &lang::Lang) {
         })
         .collect();
 
-    let has_issues = app.alerts.iter().any(|a| !a.starts_with("No active") && !a.starts_with("Нет активных"));
+    let has_issues = app
+        .alerts
+        .iter()
+        .any(|a| !a.starts_with("No active") && !a.starts_with("Нет активных"));
     let title = if has_issues {
         format!("{} ({}) ", l.alerts.trim(), app.alerts.len())
     } else {

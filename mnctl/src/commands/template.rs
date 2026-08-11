@@ -131,7 +131,9 @@ impl TemplateArgs {
                 deploy_template(&template, name.as_deref())
             }
             TemplateCommand::Info { template } => template_info(&template),
-            TemplateCommand::Update { name, tag, file } => template_update(&name, tag.as_deref(), file.as_deref()),
+            TemplateCommand::Update { name, tag, file } => {
+                template_update(&name, tag.as_deref(), file.as_deref())
+            }
         }
     }
 }
@@ -277,7 +279,10 @@ fn template_update(name: &str, tag: Option<&str>, file: Option<&str>) -> Result<
     let compose_path = format!("{deploy_dir}/docker-compose.yml");
 
     if !std::path::Path::new(&compose_path).exists() {
-        anyhow::bail!("template '{}' not found at {deploy_dir}. Deploy it first with 'mnctl template apply'", name);
+        anyhow::bail!(
+            "template '{}' not found at {deploy_dir}. Deploy it first with 'mnctl template apply'",
+            name
+        );
     }
 
     println!("{} Updating template '{}'", "→".blue(), name.bold());
@@ -313,11 +318,22 @@ fn template_update(name: &str, tag: Option<&str>, file: Option<&str>) -> Result<
     }
 
     let status = std::process::Command::new("docker")
-        .args(["compose", "-f", &compose_path, "up", "-d", "--remove-orphans"])
+        .args([
+            "compose",
+            "-f",
+            &compose_path,
+            "up",
+            "-d",
+            "--remove-orphans",
+        ])
         .status()?;
 
     if status.success() {
-        println!("  {} Template '{}' updated successfully", "●".green(), name.bold());
+        println!(
+            "  {} Template '{}' updated successfully",
+            "●".green(),
+            name.bold()
+        );
     } else {
         anyhow::bail!("failed to redeploy '{}' after update", name);
     }

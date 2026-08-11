@@ -364,7 +364,11 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                 65,
                 "Installing kernel build script...",
                 "cp",
-                &["-r", "/usr/share/monolith/kernel", "/mnt/usr/share/monolith/"],
+                &[
+                    "-r",
+                    "/usr/share/monolith/kernel",
+                    "/mnt/usr/share/monolith/",
+                ],
             );
         }
 

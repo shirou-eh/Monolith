@@ -175,9 +175,11 @@ impl SecurityArgs {
             SecurityCommand::Ids { once } => security_ids(once),
             SecurityCommand::Honeypot { ports } => security_honeypot(&ports),
             SecurityCommand::React { ip } => security_react(&ip),
-            SecurityCommand::Anomaly { unit, window_secs, once } => {
-                security_anomaly(unit.as_deref(), window_secs, once)
-            }
+            SecurityCommand::Anomaly {
+                unit,
+                window_secs,
+                once,
+            } => security_anomaly(unit.as_deref(), window_secs, once),
         }
     }
 }
@@ -253,26 +255,24 @@ fn security_audit() -> Result<()> {
     let ssh_dir = std::path::Path::new("/etc/ssh");
     let mut host_key_ok = true;
     if ssh_dir.exists() {
-        for entry in std::fs::read_dir(ssh_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
-            if let Ok(entry) = entry {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("ssh_host_") && name.ends_with("_key") {
-                    if let Ok(meta) = entry.metadata() {
-                        let mode = meta.permissions().mode() & 0o777;
-                        if mode > 0o640 {
-                            let path = entry.path().to_string_lossy().to_string();
-                            println!(
-                                "\n  {} SSH host key {} is world-readable ({:o})",
-                                "FAIL".red().bold(),
-                                path,
-                                mode
-                            );
-                            println!(
-                                "     Fix: chmod 0600 {}",
-                                path
-                            );
-                            host_key_ok = false;
-                        }
+        for entry in std::fs::read_dir(ssh_dir)
+            .unwrap_or_else(|_| std::fs::read_dir("/").unwrap())
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("ssh_host_") && name.ends_with("_key") {
+                if let Ok(meta) = entry.metadata() {
+                    let mode = meta.permissions().mode() & 0o777;
+                    if mode > 0o640 {
+                        let path = entry.path().to_string_lossy().to_string();
+                        println!(
+                            "\n  {} SSH host key {} is world-readable ({:o})",
+                            "FAIL".red().bold(),
+                            path,
+                            mode
+                        );
+                        println!("     Fix: chmod 0600 {}", path);
+                        host_key_ok = false;
                     }
                 }
             }
@@ -363,7 +363,8 @@ fn resolve_port(port: &str) -> Option<u16> {
 }
 
 fn firewall_allow(port: &str, udp: bool) -> Result<()> {
-    let port_num = resolve_port(port).ok_or_else(|| anyhow::anyhow!("unknown port or service: {port}"))?;
+    let port_num =
+        resolve_port(port).ok_or_else(|| anyhow::anyhow!("unknown port or service: {port}"))?;
     let proto = if udp { "udp" } else { "tcp" };
     let table = detect_firewall_table();
 
@@ -400,7 +401,8 @@ fn firewall_allow(port: &str, udp: bool) -> Result<()> {
 }
 
 fn firewall_deny(port: &str, udp: bool) -> Result<()> {
-    let port_num = resolve_port(port).ok_or_else(|| anyhow::anyhow!("unknown port or service: {port}"))?;
+    let port_num =
+        resolve_port(port).ok_or_else(|| anyhow::anyhow!("unknown port or service: {port}"))?;
     let proto = if udp { "udp" } else { "tcp" };
     let table = detect_firewall_table();
 
@@ -422,7 +424,12 @@ fn firewall_deny(port: &str, udp: bool) -> Result<()> {
         .with_context(|| format!("failed to add deny rule for port {port_num}"))?;
 
     if status.success() {
-        println!("{} Denied {} port {}", "●".red(), proto.to_uppercase(), port_num);
+        println!(
+            "{} Denied {} port {}",
+            "●".red(),
+            proto.to_uppercase(),
+            port_num
+        );
         save_nftables()?;
     }
     Ok(())
@@ -678,12 +685,19 @@ fn security_watch() -> Result<()> {
 
     let mut child = std::process::Command::new("journalctl")
         .args([
-            "-f", "-n", "0",
-            "-u", "sshd",
-            "-u", "apparmor",
-            "-u", "nftables",
-            "-u", "sudo",
-            "--output", "short-full",
+            "-f",
+            "-n",
+            "0",
+            "-u",
+            "sshd",
+            "-u",
+            "apparmor",
+            "-u",
+            "nftables",
+            "-u",
+            "sudo",
+            "--output",
+            "short-full",
             "--no-pager",
         ])
         .stdout(std::process::Stdio::piped())
@@ -694,21 +708,23 @@ fn security_watch() -> Result<()> {
     use std::io::{BufRead, BufReader};
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                let colored = if l.contains("Failed password") || l.contains("authentication failure") {
-                    l.red().to_string()
-                } else if l.contains("Accepted") {
-                    l.green().to_string()
-                } else if l.contains("DENIED") || l.contains("denied") || l.contains("DROP") {
-                    l.yellow().to_string()
-                } else if l.contains("sudo") {
-                    l.cyan().to_string()
-                } else {
-                    l.dimmed().to_string()
-                };
-                println!("  {colored}");
-            }
+        // map_while(Result::ok), not .flatten() — a persistent read error
+        // on this pipe would make .lines() yield Err forever, and
+        // .flatten() would spin on that forever instead of ending the
+        // loop the moment something actually goes wrong with the stream.
+        for l in reader.lines().map_while(Result::ok) {
+            let colored = if l.contains("Failed password") || l.contains("authentication failure") {
+                l.red().to_string()
+            } else if l.contains("Accepted") {
+                l.green().to_string()
+            } else if l.contains("DENIED") || l.contains("denied") || l.contains("DROP") {
+                l.yellow().to_string()
+            } else if l.contains("sudo") {
+                l.cyan().to_string()
+            } else {
+                l.dimmed().to_string()
+            };
+            println!("  {colored}");
         }
     }
     let _ = child.wait();
@@ -738,10 +754,19 @@ fn security_scan(scan_type: &str) -> Result<()> {
             let local_ip = std::process::Command::new("hostname")
                 .args(["-I"])
                 .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("127.0.0.1").to_string())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("127.0.0.1")
+                        .to_string()
+                })
                 .unwrap_or_else(|_| "127.0.0.1".to_string());
 
-            println!("{} Scanning external ports on {local_ip} (nmap)...", "→".blue());
+            println!(
+                "{} Scanning external ports on {local_ip} (nmap)...",
+                "→".blue()
+            );
             let output = std::process::Command::new("nmap")
                 .args(["-sT", "--open", "-oG", "-", &local_ip])
                 .output()
@@ -758,7 +783,7 @@ fn security_scan(scan_type: &str) -> Result<()> {
     let _ = std::os::unix::fs::symlink(&scan_file, &prev_link);
 
     // Diff against previous scan if it exists
-    let prev_content = if std::path::Path::new(&prev_link).exists() {
+    let _prev_content = if std::path::Path::new(&prev_link).exists() {
         Some(std::fs::read_to_string(&prev_link)?)
     } else {
         None
@@ -834,9 +859,11 @@ fn security_ids(once: bool) -> Result<()> {
                     }
                 }
 
-                let mut flagged: Vec<_> =
-                    counts.into_iter().filter(|(_, n)| *n >= THRESHOLD).collect();
-                flagged.sort_by(|a, b| b.1.cmp(&a.1));
+                let mut flagged: Vec<_> = counts
+                    .into_iter()
+                    .filter(|(_, n)| *n >= THRESHOLD)
+                    .collect();
+                flagged.sort_by_key(|b| std::cmp::Reverse(b.1));
 
                 if flagged.is_empty() {
                     println!("{} No anomalies in the last 10 minutes", "●".green());
@@ -850,7 +877,10 @@ fn security_ids(once: bool) -> Result<()> {
                     }
                 }
             }
-            Err(_) => println!("{} journalctl unavailable — skipping this pass", "⚠".yellow()),
+            Err(_) => println!(
+                "{} journalctl unavailable — skipping this pass",
+                "⚠".yellow()
+            ),
         }
 
         if once {
@@ -866,7 +896,10 @@ fn security_ids(once: bool) -> Result<()> {
 fn security_honeypot(ports: &str) -> Result<()> {
     use std::net::TcpListener;
 
-    let port_list: Vec<u16> = ports.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    let port_list: Vec<u16> = ports
+        .split(',')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect();
     if port_list.is_empty() {
         anyhow::bail!("no valid ports in '{ports}'");
     }
@@ -885,7 +918,11 @@ fn security_honeypot(ports: &str) -> Result<()> {
             };
             for stream in listener.incoming().flatten() {
                 if let Ok(peer) = stream.peer_addr() {
-                    println!("{} Honeypot hit on port {port} from {}", "⚠".red(), peer.ip());
+                    println!(
+                        "{} Honeypot hit on port {port} from {}",
+                        "⚠".red(),
+                        peer.ip()
+                    );
                     let _ = security_react(&peer.ip().to_string());
                 }
                 drop(stream);
@@ -907,11 +944,16 @@ fn security_react(ip: &str) -> Result<()> {
     println!("{} Reacting to {}", "→".blue(), ip.bold());
 
     let ban = Command::new("nft")
-        .args(["add", "rule", "inet", "filter", "input", "ip", "saddr", ip, "drop"])
+        .args([
+            "add", "rule", "inet", "filter", "input", "ip", "saddr", ip, "drop",
+        ])
         .status();
     match ban {
         Ok(s) if s.success() => println!("  {} Blocked {ip} via nftables", "●".green()),
-        _ => println!("  {} Could not add nftables rule (need root?)", "⚠".yellow()),
+        _ => println!(
+            "  {} Could not add nftables rule (need root?)",
+            "⚠".yellow()
+        ),
     }
 
     let snap = Command::new("snapper")
@@ -974,7 +1016,15 @@ fn security_anomaly(unit: Option<&str>, window_secs: u64, once: bool) -> Result<
 
     loop {
         let since = format!("-{window_secs}s");
-        let mut args = vec!["--since", since.as_str(), "-p", "warning..alert", "--no-pager", "-o", "cat"];
+        let mut args = vec![
+            "--since",
+            since.as_str(),
+            "-p",
+            "warning..alert",
+            "--no-pager",
+            "-o",
+            "cat",
+        ];
         if let Some(u) = unit {
             args.push("-u");
             args.push(u);
@@ -987,7 +1037,8 @@ fn security_anomaly(unit: Option<&str>, window_secs: u64, once: bool) -> Result<
                 let count = String::from_utf8_lossy(&output.stdout).lines().count() as f64;
                 let mut baseline = load_baseline();
 
-                let is_spike = count >= MIN_COUNT && baseline.ewma > 0.0 && count > baseline.ewma * MULTIPLIER;
+                let is_spike =
+                    count >= MIN_COUNT && baseline.ewma > 0.0 && count > baseline.ewma * MULTIPLIER;
 
                 if is_spike {
                     println!(
@@ -1006,15 +1057,24 @@ fn security_anomaly(unit: Option<&str>, window_secs: u64, once: bool) -> Result<
                     // Damp the update on a spike window so the baseline
                     // doesn't immediately absorb the anomaly and go blind
                     // to it repeating next window.
-                    baseline.ewma = baseline.ewma * (1.0 - ALPHA) + (baseline.ewma * MULTIPLIER) * ALPHA;
+                    baseline.ewma =
+                        baseline.ewma * (1.0 - ALPHA) + (baseline.ewma * MULTIPLIER) * ALPHA;
                 } else {
-                    println!("{} {} warning+ lines this window (baseline {:.1})", "●".green(), count as u64, baseline.ewma);
+                    println!(
+                        "{} {} warning+ lines this window (baseline {:.1})",
+                        "●".green(),
+                        count as u64,
+                        baseline.ewma
+                    );
                     baseline.ewma = baseline.ewma * (1.0 - ALPHA) + count * ALPHA;
                 }
 
                 save_baseline(&baseline);
             }
-            Err(_) => println!("{} journalctl unavailable — skipping this pass", "⚠".yellow()),
+            Err(_) => println!(
+                "{} journalctl unavailable — skipping this pass",
+                "⚠".yellow()
+            ),
         }
 
         if once {

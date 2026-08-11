@@ -42,7 +42,11 @@ enum Provider {
 impl CloudArgs {
     pub async fn run(self) -> Result<()> {
         match self.command {
-            CloudCommand::Template { provider, out, hostname } => cloud_template(&provider, &out, &hostname),
+            CloudCommand::Template {
+                provider,
+                out,
+                hostname,
+            } => cloud_template(&provider, &out, &hostname),
         }
     }
 }
@@ -158,7 +162,10 @@ fn cloud_template(provider: &Provider, out: &str, hostname: &str) -> Result<()> 
     );
     std::fs::write(format!("{out}/README.md"), &readme)?;
 
-    println!("{} Scaffolding written to {out}/ (main.tf, cloud-init.yaml, README.md)", "●".green());
+    println!(
+        "{} Scaffolding written to {out}/ (main.tf, cloud-init.yaml, README.md)",
+        "●".green()
+    );
     println!("  {} Nothing was provisioned — review the files, then: cd {out} && terraform init && terraform apply", "→".blue());
     Ok(())
 }

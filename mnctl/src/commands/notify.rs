@@ -405,8 +405,14 @@ async fn webhook_send_json(url: &str, body: &serde_json::Value) -> Result<()> {
 async fn telegram_setup() -> Result<()> {
     println!("{}", "Telegram Notification Setup".bold().underline());
     println!();
-    println!("  {} Open https://t.me/BotFather and create a new bot.", "1.".bold());
-    println!("  {} Paste the bot token you received from BotFather:", "2.".bold());
+    println!(
+        "  {} Open https://t.me/BotFather and create a new bot.",
+        "1.".bold()
+    );
+    println!(
+        "  {} Paste the bot token you received from BotFather:",
+        "2.".bold()
+    );
     println!();
 
     let token: String = dialoguer::Input::new()
@@ -418,7 +424,10 @@ async fn telegram_setup() -> Result<()> {
     }
 
     println!();
-    println!("  {} Send any message to your bot, then press Enter.", "3.".bold());
+    println!(
+        "  {} Send any message to your bot, then press Enter.",
+        "3.".bold()
+    );
 
     let _: String = dialoguer::Input::new()
         .with_prompt("Press Enter after sending a message")
@@ -444,7 +453,9 @@ async fn telegram_setup() -> Result<()> {
         .and_then(|arr| arr.last())
         .and_then(|u| u["message"]["chat"]["id"].as_i64())
         .map(|id| id.to_string())
-        .ok_or_else(|| anyhow::anyhow!("could not detect chat_id. Did you send a message to the bot?"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("could not detect chat_id. Did you send a message to the bot?")
+        })?;
 
     println!("  {} Detected chat_id: {}", "✓".green(), chat_id.bold());
 
@@ -456,9 +467,7 @@ async fn telegram_setup() -> Result<()> {
 
     // Write to config
     let config_path = "/etc/monolith/monolith.toml";
-    let config_dir = std::path::Path::new(config_path)
-        .parent()
-        .unwrap();
+    let config_dir = std::path::Path::new(config_path).parent().unwrap();
     std::fs::create_dir_all(config_dir)?;
 
     let content = if std::path::Path::new(config_path).exists() {
@@ -467,7 +476,9 @@ async fn telegram_setup() -> Result<()> {
         String::new()
     };
 
-    let mut doc: toml::Value = content.parse::<toml::Value>().unwrap_or(toml::Value::Table(toml::Table::new()));
+    let mut doc: toml::Value = content
+        .parse::<toml::Value>()
+        .unwrap_or(toml::Value::Table(toml::Table::new()));
 
     let telegram = serde_json::json!({
         "enabled": true,
@@ -486,9 +497,10 @@ async fn telegram_setup() -> Result<()> {
     } else {
         let mut notifications = toml::Table::new();
         notifications.insert("telegram".to_string(), telegram_toml);
-        doc.as_table_mut()
-            .unwrap()
-            .insert("notifications".to_string(), toml::Value::Table(notifications));
+        doc.as_table_mut().unwrap().insert(
+            "notifications".to_string(),
+            toml::Value::Table(notifications),
+        );
     }
 
     let serialized = toml::to_string_pretty(&doc)?;
@@ -761,17 +773,28 @@ fn rule_list() -> Result<()> {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.ends_with(".toml") {
             let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
-            let condition = content.lines()
+            let condition = content
+                .lines()
                 .find(|l| l.contains("condition ="))
                 .map(|l| l.trim_start_matches("condition = ").trim_matches('"'))
                 .unwrap_or("?");
-            let channel = content.lines()
+            let channel = content
+                .lines()
                 .find(|l| l.contains("channel ="))
                 .map(|l| l.trim_start_matches("channel = ").trim_matches('"'))
                 .unwrap_or("?");
             let enabled = content.contains("enabled = true");
-            let indicator = if enabled { "●".green() } else { "●".dimmed() };
-            println!("  {indicator} {:<20} if {:<30} → {}", name.trim_end_matches(".toml").bold(), condition, channel);
+            let indicator = if enabled {
+                "●".green()
+            } else {
+                "●".dimmed()
+            };
+            println!(
+                "  {indicator} {:<20} if {:<30} → {}",
+                name.trim_end_matches(".toml").bold(),
+                condition,
+                channel
+            );
         }
     }
     Ok(())

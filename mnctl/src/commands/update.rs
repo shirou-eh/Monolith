@@ -268,43 +268,46 @@ struct GithubAsset {
 /// Self-update Monolith OS from the latest GitHub release.
 async fn self_update(force: bool, version: Option<&str>) -> Result<()> {
     let repo = "shirou-eh/Monolith";
+    let client = reqwest::Client::builder()
+        .user_agent("mnctl")
+        .build()
+        .context("failed to build HTTP client")?;
 
-    let tag = match version {
-        Some(v) => v.trim_start_matches('v').to_string(),
-        None => {
-            println!("{} Checking GitHub for latest release...", "→".blue());
-            let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-            let client = reqwest::Client::builder()
-                .user_agent("mnctl")
-                .build()
-                .context("failed to build HTTP client")?;
-            let resp = client
-                .get(&url)
-                .send()
-                .await
-                .context("failed to fetch latest release from GitHub")?;
-            if !resp.status().is_success() {
-                anyhow::bail!(
-                    "GitHub API returned {} — check your network / rate limit",
-                    resp.status()
-                );
-            }
-            let release: GithubRelease = resp
-                .json()
-                .await
-                .context("failed to parse GitHub release JSON")?;
-            release.tag_name.trim_start_matches('v').to_string()
-        }
+    // Always fetch the release object (by tag if one was given, latest
+    // otherwise) rather than only doing this for "latest" and then
+    // hand-guessing the asset filename for an explicit --version. The
+    // release's own `assets` list is authoritative about what actually
+    // got uploaded — a guessed name is one rename-on-release away from
+    // a self-update that silently 404s.
+    println!("{} Checking GitHub release...", "→".blue());
+    let api_url = match version {
+        Some(v) => format!(
+            "https://api.github.com/repos/{repo}/releases/tags/v{}",
+            v.trim_start_matches('v')
+        ),
+        None => format!("https://api.github.com/repos/{repo}/releases/latest"),
     };
+    let resp = client
+        .get(&api_url)
+        .send()
+        .await
+        .context("failed to fetch release from GitHub")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "GitHub API returned {} for {api_url} — check your network / rate limit / that this version was released",
+            resp.status()
+        );
+    }
+    let release: GithubRelease = resp
+        .json()
+        .await
+        .context("failed to parse GitHub release JSON")?;
+    let tag = release.tag_name.trim_start_matches('v').to_string();
 
     let current = env!("CARGO_PKG_VERSION");
 
     if tag == current && !force {
-        println!(
-            "{} Already up to date (v{})",
-            "●".green(),
-            current.bold()
-        );
+        println!("{} Already up to date (v{})", "●".green(), current.bold());
         return Ok(());
     }
 
@@ -318,34 +321,42 @@ async fn self_update(force: bool, version: Option<&str>) -> Result<()> {
             current,
             tag.bold()
         );
+        let summary: String = release.body.lines().take(3).collect::<Vec<_>>().join(" ");
+        if !summary.trim().is_empty() {
+            println!("  {} {}", "→".blue(), summary.trim().dimmed());
+        }
     }
 
-    // Find the binary tarball for the current architecture
+    // Match against the release's real asset list instead of guessing a
+    // filename — see the comment above for why.
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
-    let tarball_name = format!("monolith-{arch}-unknown-{os}-gnu.tar.gz");
+    let expected_infix = format!("{arch}-unknown-{os}-gnu");
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name.contains(&expected_infix) && a.name.ends_with(".tar.gz"))
+        .ok_or_else(|| {
+            let available: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
+            anyhow::anyhow!(
+                "no release asset matching '*{expected_infix}*.tar.gz' in v{tag}. Available assets: {}",
+                if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+            )
+        })?;
 
-    let url = format!(
-        "https://github.com/{repo}/releases/download/v{tag}/{tarball_name}"
-    );
-
-    println!("  {} Downloading {}...", "↓".cyan(), tarball_name);
-    let client = reqwest::Client::builder()
-        .user_agent("mnctl")
-        .build()
-        .context("failed to build HTTP client")?;
+    println!("  {} Downloading {}...", "↓".cyan(), asset.name);
 
     let resp = client
-        .get(&url)
+        .get(&asset.browser_download_url)
         .send()
         .await
-        .with_context(|| format!("failed to download {tarball_name}"))?;
+        .with_context(|| format!("failed to download {}", asset.name))?;
 
     if !resp.status().is_success() {
         anyhow::bail!(
-            "download failed with HTTP {} — is v{} released?",
+            "download failed with HTTP {} for {}",
             resp.status(),
-            tag
+            asset.browser_download_url
         );
     }
 
@@ -376,10 +387,7 @@ async fn self_update(force: bool, version: Option<&str>) -> Result<()> {
         if let Ok(content) = std::fs::read_to_string(config_path) {
             if let Ok(mut doc) = content.parse::<toml::Value>() {
                 if let Some(table) = doc.as_table_mut() {
-                    table.insert(
-                        "version".to_string(),
-                        toml::Value::String(tag.clone()),
-                    );
+                    table.insert("version".to_string(), toml::Value::String(tag.clone()));
                 }
                 if let Ok(serialized) = toml::to_string_pretty(&doc) {
                     let _ = std::fs::write(config_path, &serialized);

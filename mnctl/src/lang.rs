@@ -1,5 +1,5 @@
-/// Simple runtime locale detection for mnctl.
-/// Reads $LANG and returns the appropriate string table.
+//! Simple runtime locale detection for mnctl.
+//! Reads $LANG and returns the appropriate string table.
 
 pub struct Lang {
     pub tabs: Vec<&'static str>,
@@ -26,15 +26,15 @@ pub struct Lang {
 }
 
 pub fn detect() -> Lang {
-    let lang = std::env::var("LANG")
-        .unwrap_or_else(|_| "en_US.UTF-8".into());
+    let lang = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into());
 
     if lang.starts_with("ru") {
         Lang {
             tabs: vec!["Система", "Контейнеры", "Сеть", "Логи", "Оповещ"],
             header_up: "В работе",
             header_down: "Нет соединения",
-            footer: " q:Выход  Tab:Далее  s:Система  c:Контейнеры  n:Сеть  l:Логи  a:Оповещ  ?:Помощь",
+            footer:
+                " q:Выход  Tab:Далее  s:Система  c:Контейнеры  n:Сеть  l:Логи  a:Оповещ  ?:Помощь",
             cpu: " ЦП (60 с) ",
             ram: " ОЗУ ",
             swap: " Подкачка ",
@@ -58,7 +58,8 @@ pub fn detect() -> Lang {
             tabs: vec!["System", "Containers", "Network", "Logs", "Alerts"],
             header_up: "UP",
             header_down: "DOWN",
-            footer: " q:Quit  Tab:Next  s:System  c:Containers  n:Network  l:Logs  a:Alerts  ?:Help",
+            footer:
+                " q:Quit  Tab:Next  s:System  c:Containers  n:Network  l:Logs  a:Alerts  ?:Help",
             cpu: " CPU (60s) ",
             ram: " RAM ",
             swap: " Swap ",

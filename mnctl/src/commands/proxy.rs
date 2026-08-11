@@ -80,11 +80,10 @@ fn list_proxies() -> Result<()> {
     }
 
     println!(
-        "  {:<30} {:<20} {:<14} {}",
+        "  {:<30} {:<20} {:<14} ",
         "Server Name".bold().underline(),
         "Upstream".bold().underline(),
-        "TLS Expiry".bold().underline(),
-        ""
+        "TLS Expiry".bold().underline()
     );
     for entry in std::fs::read_dir(path).context("failed to read nginx sites")? {
         let entry = entry?;
@@ -110,13 +109,7 @@ fn list_proxies() -> Result<()> {
         let cert_path = format!("/etc/letsencrypt/live/{domain}/fullchain.pem");
         let tls_expiry = if std::path::Path::new(&cert_path).exists() {
             let expiry_output = Command::new("openssl")
-                .args([
-                    "x509",
-                    "-enddate",
-                    "-noout",
-                    "-in",
-                    &cert_path,
-                ])
+                .args(["x509", "-enddate", "-noout", "-in", &cert_path])
                 .output();
             match expiry_output {
                 Ok(o) if o.status.success() => {
@@ -145,10 +138,7 @@ fn list_proxies() -> Result<()> {
 
         println!(
             "  {} {:<28} {:<20} {}",
-            glyph,
-            server_name,
-            proxy_pass,
-            tls_color,
+            glyph, server_name, proxy_pass, tls_color,
         );
     }
     Ok(())

@@ -139,9 +139,14 @@ impl KubeArgs {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 kubectl_execvp(&args_ref)
             }
-            KubeCommand::Autoscale { deployment, namespace, min, max, cpu_target, dry_run } => {
-                autoscale(&deployment, &namespace, min, max, cpu_target, dry_run)
-            }
+            KubeCommand::Autoscale {
+                deployment,
+                namespace,
+                min,
+                max,
+                cpu_target,
+                dry_run,
+            } => autoscale(&deployment, &namespace, min, max, cpu_target, dry_run),
         }
     }
 }
@@ -297,11 +302,13 @@ fn kubectl_execvp(args: &[&str]) -> Result<()> {
         (Some(k), _) => (k.to_string_lossy().to_string(), vec![]),
         (None, Some(k3)) => (k3.to_string_lossy().to_string(), vec!["kubectl"]),
         (None, None) => {
-            anyhow::bail!("kubectl/k3s not found. Install k3s with: mnctl kube install --role server");
+            anyhow::bail!(
+                "kubectl/k3s not found. Install k3s with: mnctl kube install --role server"
+            );
         }
     };
 
-    let mut all_args: Vec<&str> = extra_args.iter().copied().collect();
+    let mut all_args: Vec<&str> = extra_args.to_vec();
     all_args.extend_from_slice(args);
 
     if Path::new(KUBECONFIG_PATH).exists() && std::env::var("KUBECONFIG").is_err() {
@@ -347,7 +354,14 @@ fn kubeconfig(cat: bool) -> Result<()> {
 /// available without extra setup (CPU) rather than reaching for custom
 /// metrics, which would need Prometheus adapter wiring most Monolith
 /// installs won't have.
-fn autoscale(deployment: &str, namespace: &str, min: u32, max: u32, cpu_target: u32, dry_run: bool) -> Result<()> {
+fn autoscale(
+    deployment: &str,
+    namespace: &str,
+    min: u32,
+    max: u32,
+    cpu_target: u32,
+    dry_run: bool,
+) -> Result<()> {
     if min == 0 || max < min {
         anyhow::bail!("--max must be >= --min, and --min must be at least 1");
     }
@@ -388,7 +402,11 @@ fn autoscale(deployment: &str, namespace: &str, min: u32, max: u32, cpu_target: 
         namespace
     );
 
-    let bin = if which::which("kubectl").is_ok() { "kubectl" } else { "k3s" };
+    let bin = if which::which("kubectl").is_ok() {
+        "kubectl"
+    } else {
+        "k3s"
+    };
     let mut cmd = Command::new(bin);
     if bin == "k3s" {
         cmd.arg("kubectl");

@@ -214,9 +214,16 @@ fn config_migrate() -> Result<()> {
         return Ok(());
     }
 
-    println!("{} Schema migration: {} → {}", "→".blue(), 
-        if current_ver.is_empty() { "none" } else { current_ver },
-        schema_version);
+    println!(
+        "{} Schema migration: {} → {}",
+        "→".blue(),
+        if current_ver.is_empty() {
+            "none"
+        } else {
+            current_ver
+        },
+        schema_version
+    );
 
     let mut migrated = 0;
 
@@ -234,7 +241,9 @@ fn config_migrate() -> Result<()> {
 
         // Migration: v1.0.x → v1.1.0: add [monitoring] section
         if !content.contains("[monitoring]") && !content.contains("log_tail_lines") {
-            updated.push_str("\n[monitoring]\n# Added by schema migration v1.1.0\nlog_tail_lines = 100\n");
+            updated.push_str(
+                "\n[monitoring]\n# Added by schema migration v1.1.0\nlog_tail_lines = 100\n",
+            );
             migrated += 1;
         }
 
@@ -256,7 +265,10 @@ fn config_migrate() -> Result<()> {
     std::fs::write(marker_file, schema_version)?;
 
     if migrated > 0 {
-        println!("  {} Migration complete ({migrated} changes applied)", "●".green().bold());
+        println!(
+            "  {} Migration complete ({migrated} changes applied)",
+            "●".green().bold()
+        );
     } else {
         println!("  {} All files already up-to-date", "●".green());
     }
