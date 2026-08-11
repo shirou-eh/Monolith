@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.1] — Unreleased — "Obsidian"
 
+## [1.3.0] — Unreleased — "Slate"
+
+A general-purpose release: Monolith stops being server-only, gains a
+reactive security layer instead of purely static rules, and identifies
+itself correctly instead of reporting as bare Arch Linux.
+
+### Added
+
+- **`desktop` resource profile** (`mnctl profile set desktop`) — a
+  fourth profile alongside `lite`/`full`/`pro` for a regular PC rather
+  than a headless box. Monitoring stack off, `mnweb` on as a local
+  dashboard, SSH back on port 22, and its own `desktop` hardening
+  level (debugger/profiler-friendly instead of server-locked-down).
+- `mnctl security ids` — behavioural pass over recent sshd activity,
+  flags source IPs past a failed-login threshold.
+- `mnctl security honeypot` — decoy ports; any connection is treated
+  as hostile and reacted to automatically.
+- `mnctl security react <ip>` — immediate nftables ban + forensic
+  snapper snapshot for a confirmed-hostile source.
+- `mnctl security harden --level desktop` — new hardening level with
+  its own sysctl set (ptrace/BPF/perf stay usable for local dev tools).
+- `mnctl tune auto` — continuous CPU/IO re-tuning against live load
+  average instead of a one-shot pass at install time.
+- `mnctl cluster fs mount` / `umount` / `sync-status` — shared
+  filesystem across cluster nodes (sshfs-backed) layered over the
+  existing btrfs/snapper stack.
+- `mnctl cluster schedule <command>` — runs a command on whichever
+  cluster node currently has the most free memory.
+- `mnpkg update --self` — fetches the latest Monolith release from
+  `github.com/shirou-eh/Monolith`, snapshots first, installs it.
+- Monolith-branded `/etc/os-release` (`fastfetch`, `neofetch`,
+  `lsb_release`, desktop "About" panels now correctly report
+  "Monolith OS" instead of "Arch Linux"), plus a distro logo
+  (`/usr/share/pixmaps/monolith.{svg,png}`) and a matching fastfetch
+  config/ASCII logo shipped under `/etc/fastfetch/`.
+
+### Fixed
+
+- Installer never wrote `/etc/os-release` — every install reported
+  itself as plain Arch Linux regardless of everything else Monolith
+  had configured. The installer now writes a proper Monolith
+  `os-release` as part of the base install steps.
+
 ## [1.2.0] — Unreleased — "Onyx"
 
 Part 1 + Part 2 combined release — combines all v1.0.2 patches with new

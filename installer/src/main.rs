@@ -25,6 +25,27 @@ Yb, `88'  `88'  `88                                          IP'`Yb         I8  
      88    88    `Y8P"Y8888P"    8P'   8I   `Y8P"Y8888P"    8P'"Y888P""Y888P""Y8888P     `Y8       `"Y8888P"'    P' "YY8P8P
 "#;
 
+/// Written to `/mnt/etc/os-release` at install time so every tool that
+/// reads it — fastfetch, neofetch, lsb_release, desktop "About" panels —
+/// identifies the machine as Monolith rather than plain Arch. `ID_LIKE`
+/// stays "arch" so anything checking compatibility (AUR helpers, some
+/// pacman hooks) keeps working unmodified.
+const MONOLITH_OS_RELEASE: &str = r#"NAME="Monolith OS"
+PRETTY_NAME="Monolith OS 1.3.0 (Slate)"
+ID=monolith
+ID_LIKE=arch
+BUILD_ID=1.3.0
+VERSION="1.3.0 (Slate)"
+VERSION_ID=1.3.0
+VERSION_CODENAME=slate
+ANSI_COLOR="38;2;80;200;120"
+LOGO=monolith
+HOME_URL="https://shirou-eh.github.io/Monolith-website/"
+DOCUMENTATION_URL="https://github.com/shirou-eh/Monolith/blob/main/README.md"
+SUPPORT_URL="https://github.com/shirou-eh/Monolith/discussions"
+BUG_REPORT_URL="https://github.com/shirou-eh/Monolith/issues"
+"#;
+
 #[derive(Clone, PartialEq)]
 enum Step {
     Welcome,
@@ -319,6 +340,14 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         let _ = tx.send(InstallMsg::Log(format!("Setting hostname to {hn}...")));
         let _ = tx.send(InstallMsg::Progress(65));
         let _ = std::fs::write("/mnt/etc/hostname", format!("{hn}\n"));
+
+        // Step 7b: Brand /etc/os-release as Monolith, not bare Arch.
+        // Without this, every tool that reads it — fastfetch, neofetch,
+        // lsb_release, desktop "About" panels — reports the install as
+        // plain "Arch Linux", which is what it's built on but not what
+        // it is once mnctl/mnweb/the kernel patches are in place.
+        let _ = tx.send(InstallMsg::Log("Writing /etc/os-release...".to_string()));
+        let _ = std::fs::write("/mnt/etc/os-release", MONOLITH_OS_RELEASE);
 
         // Step 8: Set keyboard layout
         run_install_step(

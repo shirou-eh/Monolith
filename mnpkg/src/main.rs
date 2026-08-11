@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use serde::Deserialize;
 use std::process::Command;
 use tracing_subscriber::EnvFilter;
 
@@ -31,8 +32,19 @@ enum Commands {
         /// Package name
         pkg: String,
     },
-    /// Update all packages with snapshot safety
-    Update,
+    /// Update all packages with snapshot safety, or Monolith itself with --self
+    Update {
+        /// Fetch the latest Monolith release from GitHub and install it,
+        /// instead of updating system packages
+        #[arg(long = "self")]
+        self_update: bool,
+        /// Specific release tag to install (implies --self), e.g. "v1.2.0"
+        #[arg(long)]
+        version: Option<String>,
+        /// Reinstall even if already on the target version (implies --self)
+        #[arg(long)]
+        force: bool,
+    },
     /// Search packages in repos and AUR
     Search {
         /// Search query
@@ -81,7 +93,13 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Install { pkg } => install_package(&pkg),
         Commands::Remove { pkg } => remove_package(&pkg),
-        Commands::Update => update_packages(),
+        Commands::Update { self_update, version, force } => {
+            if self_update || version.is_some() || force {
+                self_update_monolith(force, version.as_deref()).await
+            } else {
+                update_packages()
+            }
+        }
         Commands::Search { query } => search_packages(&query),
         Commands::Info { pkg } => package_info(&pkg),
         Commands::Rollback => rollback(),
@@ -528,6 +546,112 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// `mnpkg update --self` — check the upstream `shirou-eh/Monolith`
+/// GitHub repo for a newer release, download the matching release
+/// tarball, snapshot first (same snapshot-before-upgrade rule the
+/// regular `mnpkg update` follows), and unpack it into place.
+async fn self_update_monolith(force: bool, version: Option<&str>) -> Result<()> {
+    let repo = "shirou-eh/Monolith";
+    let client = reqwest::Client::builder()
+        .user_agent("mnpkg")
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let tag = match version {
+        Some(v) => v.trim_start_matches('v').to_string(),
+        None => {
+            println!("{} Checking {repo} for the latest release...", "→".blue());
+            let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .context("failed to reach GitHub")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("GitHub API returned {} — check network / rate limit", resp.status());
+            }
+            let release: GithubRelease = resp
+                .json()
+                .await
+                .context("failed to parse GitHub release JSON")?;
+            release.tag_name.trim_start_matches('v').to_string()
+        }
+    };
+
+    let current = env!("CARGO_PKG_VERSION");
+    if tag == current && !force {
+        println!("{} mnpkg is already on v{}", "●".green(), current.bold());
+        return Ok(());
+    }
+
+    println!(
+        "{} Updating Monolith v{} → v{}",
+        "→".blue(),
+        current,
+        tag.bold()
+    );
+
+    // Same rule as a normal `mnpkg update`: snapshot before touching anything.
+    println!("{} Creating pre-update snapshot...", "→".blue());
+    let _ = Command::new("snapper")
+        .args(["create", "--description", &format!("pre-mnpkg-self-update-{tag}"), "--type", "pre"])
+        .output();
+
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let tarball_name = format!("monolith-{arch}-unknown-{os}-gnu.tar.gz");
+    let url = format!("https://github.com/{repo}/releases/download/v{tag}/{tarball_name}");
+
+    println!("  {} Downloading {tarball_name}...", "↓".cyan());
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to download {tarball_name}"))?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("download failed with HTTP {} — is v{tag} released?", resp.status());
+    }
+
+    let bytes = resp.bytes().await.context("failed to read response body")?;
+    let tmp = "/tmp/mnpkg-self-update.tar.gz";
+    std::fs::write(tmp, &bytes).context("failed to write tarball to /tmp")?;
+
+    let install_dir = "/usr/local/bin";
+    println!("  {} Extracting to {install_dir}...", "→".blue());
+    let output = Command::new("sh")
+        .args(["-c", &format!("tar -xzf {tmp} -C {install_dir}")])
+        .output()
+        .context("failed to extract tarball")?;
+
+    let _ = std::fs::remove_file(tmp);
+
+    if !output.status.success() {
+        anyhow::bail!("extraction failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    println!();
+    println!("{} Monolith v{} installed to {install_dir}", "✓".green(), tag.bold());
+    println!("{} Post-update snapshot...", "→".blue());
+    let _ = Command::new("snapper")
+        .args(["create", "--description", &format!("post-mnpkg-self-update-{tag}"), "--type", "post"])
+        .output();
+
+    Ok(())
 }
 
 fn show_history() -> Result<()> {
