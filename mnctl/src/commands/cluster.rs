@@ -62,6 +62,21 @@ enum ClusterCommand {
         /// Command to run on the chosen node
         command: String,
     },
+    /// Watch a directory for new jobs and dispatch each one to whichever
+    /// node has the most free memory, fully automatically — no manual
+    /// `cluster schedule` call needed per job.
+    #[command(name = "autobalance")]
+    AutoBalance {
+        /// Directory to watch for new job files
+        #[arg(long, default_value = "/var/lib/monolith/cluster/jobs")]
+        watch_dir: String,
+        /// Seconds between scans of the watch directory
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
+        /// Scan once and exit instead of running forever
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Args)]
@@ -107,6 +122,9 @@ impl ClusterArgs {
                 FsCommand::SyncStatus => cluster_fs_sync_status(),
             },
             ClusterCommand::Schedule { command } => cluster_schedule(&command),
+            ClusterCommand::AutoBalance { watch_dir, interval, once } => {
+                cluster_autobalance(&watch_dir, interval, once)
+            }
         }
     }
 }
@@ -491,28 +509,52 @@ fn cluster_fs_sync_status() -> Result<()> {
 /// given command there over SSH. Falls back to running locally when
 /// there are no reachable peers, so this is safe to call from a single
 /// node too.
-fn cluster_schedule(command: &str) -> Result<()> {
-    let nodes = read_peer_nodes();
+/// Free memory (kB) on a reachable peer, or `None` if it can't be reached
+/// within the timeout.
+fn peer_free_mem_kb(node: &str) -> Option<u64> {
+    let output = Command::new("ssh")
+        .args([
+            "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+            node, "awk", "/MemAvailable/{print $2}", "/proc/meminfo",
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Free memory (kB) on this machine.
+fn local_free_mem_kb() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    content
+        .lines()
+        .find(|l| l.starts_with("MemAvailable:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+}
+
+/// Compare free memory across every peer AND this machine, and return
+/// whichever has the most. `None` means "run locally" — either nothing
+/// beats the local box, or there are no reachable peers at all.
+fn pick_best_node() -> Option<(String, u64)> {
+    let local_kb = local_free_mem_kb().unwrap_or(0);
     let mut best: Option<(String, u64)> = None;
 
-    for node in &nodes {
-        let output = Command::new("ssh")
-            .args([
-                "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
-                node, "awk", "/MemAvailable/{print $2}", "/proc/meminfo",
-            ])
-            .output();
-
-        if let Ok(output) = output {
-            if let Ok(kb) = String::from_utf8_lossy(&output.stdout).trim().parse::<u64>() {
-                if best.as_ref().map(|(_, b)| kb > *b).unwrap_or(true) {
-                    best = Some((node.clone(), kb));
-                }
+    for node in read_peer_nodes() {
+        if let Some(kb) = peer_free_mem_kb(&node) {
+            if best.as_ref().map(|(_, b)| kb > *b).unwrap_or(true) {
+                best = Some((node, kb));
             }
         }
     }
 
     match best {
+        Some((node, kb)) if kb > local_kb => Some((node, kb)),
+        _ => None,
+    }
+}
+
+fn cluster_schedule(command: &str) -> Result<()> {
+    match pick_best_node() {
         Some((node, kb)) => {
             println!("{} Scheduling on {} ({} MB free)", "→".blue(), node.bold(), kb / 1024);
             let status = Command::new("ssh").args([&node, command]).status()?;
@@ -521,7 +563,7 @@ fn cluster_schedule(command: &str) -> Result<()> {
             }
         }
         None => {
-            println!("{} No reachable peers — running locally", "→".blue());
+            println!("{} Running locally — this box has the most free capacity", "→".blue());
             let status = Command::new("sh").args(["-c", command]).status()?;
             if !status.success() {
                 anyhow::bail!("command failed locally");
@@ -529,4 +571,89 @@ fn cluster_schedule(command: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Watch `watch_dir` for new job files and dispatch each one to whichever
+/// node currently has the most free memory — no human has to pick, and
+/// no human has to call `cluster schedule` per job. Each job file's
+/// content is piped to `bash` (locally or over ssh, same either way),
+/// then moved into `done/` or `failed/` depending on the exit status,
+/// with a one-line record appended to `watch_dir/autobalance.log`.
+fn cluster_autobalance(watch_dir: &str, interval: u64, once: bool) -> Result<()> {
+    let incoming = format!("{watch_dir}/incoming");
+    let done = format!("{watch_dir}/done");
+    let failed = format!("{watch_dir}/failed");
+    for dir in [&incoming, &done, &failed] {
+        std::fs::create_dir_all(dir).with_context(|| format!("failed to create {dir}"))?;
+    }
+    let log_path = format!("{watch_dir}/autobalance.log");
+
+    loop {
+        let mut entries: Vec<_> = std::fs::read_dir(&incoming)
+            .with_context(|| format!("failed to read {incoming}"))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let script = std::fs::read(&path).unwrap_or_default();
+
+            let (target, status) = match pick_best_node() {
+                Some((node, kb)) => {
+                    println!(
+                        "{} {name} → {node} ({} MB free)",
+                        "→".blue(),
+                        kb / 1024
+                    );
+                    let mut ssh_cmd = Command::new("ssh");
+                    ssh_cmd.args([
+                        "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", &node, "bash",
+                    ]);
+                    let status = run_piped(&mut ssh_cmd, &script);
+                    (node, status)
+                }
+                None => {
+                    println!("{} {name} → local (most free capacity)", "→".blue());
+                    let mut bash_cmd = Command::new("bash");
+                    let status = run_piped(&mut bash_cmd, &script);
+                    ("local".to_string(), status)
+                }
+            };
+
+            let ok = status.map(|s| s.success()).unwrap_or(false);
+            let dest_dir = if ok { &done } else { &failed };
+            let _ = std::fs::rename(&path, format!("{dest_dir}/{name}"));
+
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let line = format!(
+                "{ts} {name} -> {target} : {}\n",
+                if ok { "ok" } else { "failed" }
+            );
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                use std::io::Write;
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+
+        if once {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+    }
+}
+
+/// Run `cmd`, feeding `input` on stdin, and wait for it to finish.
+fn run_piped(cmd: &mut Command, input: &[u8]) -> Option<std::process::ExitStatus> {
+    use std::io::Write;
+    let mut child = cmd.stdin(std::process::Stdio::piped()).spawn().ok()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(input);
+    }
+    child.wait().ok()
 }

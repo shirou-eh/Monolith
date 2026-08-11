@@ -1,0 +1,24 @@
+[Unit]
+Description=Monolith OS cluster autobalance — automatic job placement across nodes
+Documentation=https://github.com/shirou-eh/Monolith
+After=network-online.target monolith-cluster.service
+Wants=network-online.target
+ConditionPathExists=/etc/monolith/cluster/cluster.toml
+
+[Service]
+Type=simple
+# Drop a job (a shell script) into /var/lib/monolith/cluster/jobs/incoming
+# and it gets picked up and run on whichever node — this one or a peer —
+# currently has the most free memory. No manual `mnctl cluster schedule`
+# call needed. Peers that are offline (this machine is intermittent; the
+# always-on box may see it come and go) are simply skipped for that scan
+# and retried on the next one.
+ExecStart=/usr/bin/mnctl cluster autobalance
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monolith-cluster-autobalance
+
+[Install]
+WantedBy=multi-user.target
