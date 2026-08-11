@@ -7,6 +7,10 @@ base-devel
 linux
 linux-firmware
 mkinitcpio
+# Provides the archiso/archiso_loop_mnt/archiso_pxe_* mkinitcpio hooks —
+# without this, mkarchiso's own initramfs build inside the live rootfs
+# fails with "Hook 'archiso' cannot be found" and produces no ISO at all.
+mkinitcpio-archiso
 syslinux
 grub
 efibootmgr
