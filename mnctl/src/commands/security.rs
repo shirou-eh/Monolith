@@ -71,11 +71,17 @@ enum FirewallCommand {
     Allow {
         /// Port number or service name (e.g., 80, 443, http, https)
         port: String,
+        /// Rule applies to UDP instead of TCP (e.g. DNS, mDNS)
+        #[arg(long)]
+        udp: bool,
     },
     /// Deny traffic on a port or service
     Deny {
         /// Port number or service name
         port: String,
+        /// Rule applies to UDP instead of TCP
+        #[arg(long)]
+        udp: bool,
     },
     /// List all firewall rules
     List,
@@ -132,8 +138,8 @@ impl SecurityArgs {
             SecurityCommand::Audit => security_audit(),
             SecurityCommand::Firewall(args) => match args.command {
                 FirewallCommand::Status => firewall_status(),
-                FirewallCommand::Allow { port } => firewall_allow(&port),
-                FirewallCommand::Deny { port } => firewall_deny(&port),
+                FirewallCommand::Allow { port, udp } => firewall_allow(&port, udp),
+                FirewallCommand::Deny { port, udp } => firewall_deny(&port, udp),
                 FirewallCommand::List => firewall_list(),
                 FirewallCommand::Reload => firewall_reload(),
             },
@@ -305,32 +311,54 @@ fn firewall_status() -> Result<()> {
     Ok(())
 }
 
-fn firewall_allow(port: &str) -> Result<()> {
-    let port_num: u16 = port.parse().unwrap_or(match port {
-        "http" => 80,
-        "https" => 443,
-        "ssh" => 2222,
-        "dns" => 53,
-        "mysql" => 3306,
-        "postgresql" | "postgres" => 5432,
-        "redis" => 6379,
-        "mongodb" => 27017,
-        "minecraft" => 25565,
-        _ => 0,
-    });
-
-    if port_num == 0 {
-        anyhow::bail!("unknown port or service: {port}");
+/// Find the `inet` table this system's firewall rules actually live in.
+///
+/// The project's own template (`security/nftables/monolith.nft`) creates
+/// `inet monolith`, but plenty of boxes — including both machines this
+/// was tested against — never had that template loaded and are still
+/// running whatever the base install's `inet filter` table is. Rather
+/// than fail on real systems, prefer `monolith` if it exists and fall
+/// back to `filter`, which is the practical default almost everywhere.
+fn detect_firewall_table() -> String {
+    let output = Command::new("nft").args(["list", "tables"]).output();
+    if let Ok(output) = output {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.lines().any(|l| l.trim() == "table inet monolith") {
+            return "monolith".to_string();
+        }
     }
+    "filter".to_string()
+}
+
+fn resolve_port(port: &str) -> Option<u16> {
+    port.parse().ok().or(match port {
+        "http" => Some(80),
+        "https" => Some(443),
+        "ssh" => Some(2222),
+        "dns" => Some(53),
+        "mdns" => Some(5353),
+        "mysql" => Some(3306),
+        "postgresql" | "postgres" => Some(5432),
+        "redis" => Some(6379),
+        "mongodb" => Some(27017),
+        "minecraft" => Some(25565),
+        _ => None,
+    })
+}
+
+fn firewall_allow(port: &str, udp: bool) -> Result<()> {
+    let port_num = resolve_port(port).ok_or_else(|| anyhow::anyhow!("unknown port or service: {port}"))?;
+    let proto = if udp { "udp" } else { "tcp" };
+    let table = detect_firewall_table();
 
     let status = Command::new("nft")
         .args([
             "add",
             "rule",
             "inet",
-            "monolith",
+            &table,
             "input",
-            "tcp",
+            proto,
             "dport",
             &port_num.to_string(),
             "accept",
@@ -342,8 +370,9 @@ fn firewall_allow(port: &str) -> Result<()> {
 
     if status.success() {
         println!(
-            "{} Allowed TCP port {} ({})",
+            "{} Allowed {} port {} ({})",
             "●".green(),
+            proto.to_uppercase(),
             port_num.to_string().bold(),
             port
         );
@@ -354,20 +383,19 @@ fn firewall_allow(port: &str) -> Result<()> {
     Ok(())
 }
 
-fn firewall_deny(port: &str) -> Result<()> {
-    let port_num: u16 = port.parse().unwrap_or(0);
-    if port_num == 0 {
-        anyhow::bail!("invalid port: {port}");
-    }
+fn firewall_deny(port: &str, udp: bool) -> Result<()> {
+    let port_num = resolve_port(port).ok_or_else(|| anyhow::anyhow!("unknown port or service: {port}"))?;
+    let proto = if udp { "udp" } else { "tcp" };
+    let table = detect_firewall_table();
 
     let status = Command::new("nft")
         .args([
             "add",
             "rule",
             "inet",
-            "monolith",
+            &table,
             "input",
-            "tcp",
+            proto,
             "dport",
             &port_num.to_string(),
             "drop",
@@ -378,7 +406,7 @@ fn firewall_deny(port: &str) -> Result<()> {
         .with_context(|| format!("failed to add deny rule for port {port_num}"))?;
 
     if status.success() {
-        println!("{} Denied TCP port {}", "●".red(), port_num);
+        println!("{} Denied {} port {}", "●".red(), proto.to_uppercase(), port_num);
         save_nftables()?;
     }
     Ok(())
