@@ -38,6 +38,23 @@ enum SecurityCommand {
         #[arg(long, default_value = "internal")]
         scan_type: String,
     },
+    /// Behavioural intrusion detection layered on nftables/AppArmor/fail2ban
+    Ids {
+        /// Run a single evaluation pass and exit instead of polling forever
+        #[arg(long)]
+        once: bool,
+    },
+    /// Bind decoy ports — any connection is treated as hostile and reacted to
+    Honeypot {
+        /// Comma-separated ports to listen on
+        #[arg(long, default_value = "23,3389,5432")]
+        ports: String,
+    },
+    /// Immediately ban a source and snapshot system state for forensics
+    React {
+        /// Source IP to react to
+        ip: String,
+    },
 }
 
 #[derive(Args)]
@@ -136,6 +153,9 @@ impl SecurityArgs {
             SecurityCommand::Harden { level } => apply_hardening(&level),
             SecurityCommand::Watch => security_watch(),
             SecurityCommand::Scan { scan_type } => security_scan(&scan_type),
+            SecurityCommand::Ids { once } => security_ids(once),
+            SecurityCommand::Honeypot { ports } => security_honeypot(&ports),
+            SecurityCommand::React { ip } => security_react(&ip),
         }
     }
 }
@@ -531,6 +551,17 @@ fn apply_hardening(level: &str) -> Result<()> {
             println!("  {} Applying balanced server hardening", "→".blue());
             println!("  {} Enforcing critical AppArmor profiles", "→".blue());
         }
+        "desktop" => {
+            println!("  {} Applying desktop-friendly hardening", "→".blue());
+            println!(
+                "  {} AppArmor profiles set to complain (log, don't block)",
+                "→".blue()
+            );
+            println!(
+                "  {} Debugger/profiler restrictions relaxed for local dev tools",
+                "→".blue()
+            );
+        }
         "default" => {
             println!(
                 "  {} Restoring default Monolith security settings",
@@ -538,7 +569,9 @@ fn apply_hardening(level: &str) -> Result<()> {
             );
         }
         _ => {
-            anyhow::bail!("unknown hardening level: {level}. Use: paranoid, server, or default");
+            anyhow::bail!(
+                "unknown hardening level: {level}. Use: paranoid, server, desktop, or default"
+            );
         }
     }
 
@@ -560,6 +593,23 @@ fn apply_hardening(level: &str) -> Result<()> {
             ("kernel.perf_event_paranoid", "3"),
             ("kernel.yama.ptrace_scope", "1"),
             ("kernel.sysrq", "0"),
+            ("net.ipv4.conf.all.rp_filter", "1"),
+            ("net.ipv4.tcp_syncookies", "1"),
+        ],
+        // A desktop still gets real protection (dmesg/kptr hidden from
+        // unprivileged users, SYN cookies, rp_filter), but doesn't pay
+        // for restrictions that mainly exist to stop remote attackers
+        // probing a headless box: BPF and perf stay usable for local
+        // dev/profiling tools, ptrace_scope stays at the *system*
+        // default (0) so `gdb -p`/`strace -p` work without ceremony,
+        // and sysrq stays on since a human is physically at the box.
+        "desktop" => vec![
+            ("kernel.dmesg_restrict", "1"),
+            ("kernel.kptr_restrict", "1"),
+            ("kernel.unprivileged_bpf_disabled", "0"),
+            ("kernel.perf_event_paranoid", "1"),
+            ("kernel.yama.ptrace_scope", "0"),
+            ("kernel.sysrq", "1"),
             ("net.ipv4.conf.all.rp_filter", "1"),
             ("net.ipv4.tcp_syncookies", "1"),
         ],
@@ -707,5 +757,126 @@ fn security_scan(scan_type: &str) -> Result<()> {
 
     println!();
     println!("  {} Saved to {scan_file}", "●".green());
+    Ok(())
+}
+
+/// Behavioural pass over recent sshd activity: counts failed logins per
+/// source IP over the last 10 minutes and flags anything past a fixed
+/// threshold. Layered on top of the existing nftables/AppArmor/fail2ban
+/// stack rather than replacing it — flags for `mnctl security react`,
+/// doesn't ban on its own.
+fn security_ids(once: bool) -> Result<()> {
+    const WINDOW: &str = "-10min";
+    const THRESHOLD: u32 = 5;
+
+    loop {
+        let output = Command::new("journalctl")
+            .args(["-u", "sshd", "--since", WINDOW, "--no-pager", "-o", "cat"])
+            .output();
+
+        match output {
+            Ok(output) => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut counts: std::collections::HashMap<String, u32> =
+                    std::collections::HashMap::new();
+
+                for line in text.lines().filter(|l| l.contains("Failed password")) {
+                    if let Some(ip) = line
+                        .split("from ")
+                        .nth(1)
+                        .and_then(|s| s.split_whitespace().next())
+                    {
+                        *counts.entry(ip.to_string()).or_insert(0) += 1;
+                    }
+                }
+
+                let mut flagged: Vec<_> =
+                    counts.into_iter().filter(|(_, n)| *n >= THRESHOLD).collect();
+                flagged.sort_by(|a, b| b.1.cmp(&a.1));
+
+                if flagged.is_empty() {
+                    println!("{} No anomalies in the last 10 minutes", "●".green());
+                } else {
+                    for (ip, n) in &flagged {
+                        println!(
+                            "{} {n} failed logins from {} in 10min — run `mnctl security react {ip}`",
+                            "⚠".yellow(),
+                            ip.bold()
+                        );
+                    }
+                }
+            }
+            Err(_) => println!("{} journalctl unavailable — skipping this pass", "⚠".yellow()),
+        }
+
+        if once {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+/// Listen on decoy ports. Nothing legitimate ever connects to them, so
+/// any inbound connection is treated as hostile and handed straight to
+/// `security_react`.
+fn security_honeypot(ports: &str) -> Result<()> {
+    use std::net::TcpListener;
+
+    let port_list: Vec<u16> = ports.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    if port_list.is_empty() {
+        anyhow::bail!("no valid ports in '{ports}'");
+    }
+
+    println!("{} Starting honeypot on ports: {:?}", "→".blue(), port_list);
+
+    let mut handles = Vec::new();
+    for port in port_list {
+        handles.push(std::thread::spawn(move || {
+            let listener = match TcpListener::bind(("0.0.0.0", port)) {
+                Ok(l) => l,
+                Err(e) => {
+                    println!("{} Could not bind decoy port {port}: {e}", "⚠".yellow());
+                    return;
+                }
+            };
+            for stream in listener.incoming().flatten() {
+                if let Ok(peer) = stream.peer_addr() {
+                    println!("{} Honeypot hit on port {port} from {}", "⚠".red(), peer.ip());
+                    let _ = security_react(&peer.ip().to_string());
+                }
+                drop(stream);
+            }
+        }));
+    }
+
+    for h in handles {
+        let _ = h.join();
+    }
+    Ok(())
+}
+
+/// Immediate response to a confirmed-hostile source: hard-block it at
+/// the firewall and take a forensic snapshot so there's something to
+/// investigate afterwards. Deliberately does the minimum and nothing
+/// clever — this runs unattended.
+fn security_react(ip: &str) -> Result<()> {
+    println!("{} Reacting to {}", "→".blue(), ip.bold());
+
+    let ban = Command::new("nft")
+        .args(["add", "rule", "inet", "filter", "input", "ip", "saddr", ip, "drop"])
+        .status();
+    match ban {
+        Ok(s) if s.success() => println!("  {} Blocked {ip} via nftables", "●".green()),
+        _ => println!("  {} Could not add nftables rule (need root?)", "⚠".yellow()),
+    }
+
+    let snap = Command::new("snapper")
+        .args(["create", "--description", &format!("security-react-{ip}")])
+        .status();
+    match snap {
+        Ok(s) if s.success() => println!("  {} Forensic snapshot created", "●".green()),
+        _ => println!("  {} snapper snapshot skipped (unavailable)", "⚠".yellow()),
+    }
+
     Ok(())
 }

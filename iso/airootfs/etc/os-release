@@ -1,0 +1,14 @@
+NAME="Monolith OS"
+PRETTY_NAME="Monolith OS 1.3.0 (Slate)"
+ID=monolith
+ID_LIKE=arch
+BUILD_ID=1.3.0
+VERSION="1.3.0 (Slate)"
+VERSION_ID=1.3.0
+VERSION_CODENAME=slate
+ANSI_COLOR="38;2;80;200;120"
+LOGO=monolith
+HOME_URL="https://shirou-eh.github.io/Monolith-website/"
+DOCUMENTATION_URL="https://github.com/shirou-eh/Monolith/blob/main/README.md"
+SUPPORT_URL="https://github.com/shirou-eh/Monolith/discussions"
+BUG_REPORT_URL="https://github.com/shirou-eh/Monolith/issues"

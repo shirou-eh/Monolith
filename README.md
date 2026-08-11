@@ -211,13 +211,16 @@ mnctl proxy add mc-survival.example.com --service mc-survival --tls
 
 ## System Profiles
 
-Monolith ships three resource profiles. Each ISO defaults to one, but you can switch at any time after install with `mnctl profile set <tier>`.
+Monolith ships four resource profiles. Each ISO defaults to one, but you can switch at any time after install with `mnctl profile set <tier>`.
 
-| Profile | CPU      | RAM     | Disk   | Default-on services                    | Use case                          |
-|---------|----------|---------|--------|----------------------------------------|------------------------------------|
-| `lite`  | 1 vCPU   | 512 MB  | 8 GB   | `mnweb` (off), monitoring (off)         | Discord bots, microservers         |
-| `full`  | 2 cores  | 2 GB    | 20 GB  | `mnweb`, monitoring, container runtime  | Single-node home server            |
-| `pro`   | 4+ cores | 8+ GB   | 100 GB | All of `full` + `k3s`, etcd cluster     | Production cluster, k3s nodes      |
+| Profile   | CPU      | RAM     | Disk   | Default-on services                    | Use case                          |
+|-----------|----------|---------|--------|----------------------------------------|------------------------------------|
+| `lite`    | 1 vCPU   | 512 MB  | 8 GB   | `mnweb` (off), monitoring (off)         | Discord bots, microservers         |
+| `full`    | 2 cores  | 2 GB    | 20 GB  | `mnweb`, monitoring, container runtime  | Single-node home server            |
+| `pro`     | 4+ cores | 8+ GB   | 100 GB | All of `full` + `k3s`, etcd cluster     | Production cluster, k3s nodes      |
+| `desktop` | any      | any     | any    | `mnweb` (local dashboard), monitoring off, SSH on port 22 | Regular PC — laptop, workstation, home tower |
+
+`desktop` isn't a smaller server profile — it's for a machine with someone sitting in front of it. Monitoring stays off (nobody's scraping a laptop's metrics), SSH drops the server-hardened port 2222 back to the standard 22, and `mnctl security harden --level desktop` swaps the server sysctl set for one that keeps `gdb`/`strace`/profilers usable without ceremony.
 
 Both `x86_64` and `ARM64` are supported in source builds. The `lite` ISO trims the monitoring stack and other heavy packages from the live medium so the download stays under ~1.3 GB.
 
@@ -306,12 +309,14 @@ A pacman-compatible CLI that adds:
 - **AUR support** - transparent fallback to an AUR helper when a package is not in the official repos.
 - **CVE audit** - `mnpkg audit` queries arch-audit and surfaces affected installed packages.
 - **Familiar verbs** - `install`, `remove`, `search`, `info`, `list-installed`, `clean`, plus `rollback <snapshot>`.
+- **Self-update (v1.3.0)** - `mnpkg update --self` fetches the latest Monolith release straight from `github.com/shirou-eh/Monolith`, snapshots first, installs it.
 
 ```bash
 mnpkg install nginx
 mnpkg upgrade            # Snapshots, then -Syu
 mnpkg audit              # CVE check
 mnpkg rollback latest    # Roll back the last upgrade
+mnpkg update --self      # Update Monolith itself from the latest GitHub release
 ```
 
 ---
@@ -432,12 +437,19 @@ Monolith ships defense-in-depth defaults:
 - **Kernel hardening:** sysctl tuning for ASLR, ptrace restriction, `kernel.dmesg_restrict`, network spoofing protections.
 - **CVE auditing:** `mnctl security cve-check` and `mnpkg audit` use arch-audit on demand and weekly via a systemd timer.
 - **TLS everywhere:** `mnctl proxy` integrates with Let's Encrypt out of the box.
+- **Reactive, not just static (v1.3.0):** `mnctl security ids` watches for
+  anomalous login patterns, `mnctl security honeypot` reacts to anyone
+  probing decoy ports, and `mnctl security react <ip>` bans + snapshots
+  immediately — layered on top of the rules above, not a replacement.
 
 ```bash
 mnctl security audit              # Pass/fail summary across all categories
 mnctl security firewall list
 mnctl security harden             # Apply all defaults to a converted Arch box
+mnctl security harden --level desktop  # Debugger/profiler-friendly variant
 mnctl security cve-check
+mnctl security ids                # Behavioural check over the last 10 minutes
+mnctl security react 203.0.113.7  # Ban + forensic snapshot
 ```
 
 The full security configuration lives under `security/` and is fully transparent.

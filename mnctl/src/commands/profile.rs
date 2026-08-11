@@ -1,6 +1,6 @@
 //! Resource profile management.
 //!
-//! Monolith ships three opinionated profiles:
+//! Monolith ships four opinionated profiles:
 //!
 //! * `lite` — designed for ≤512 MB RAM, single-app hosts (Discord bots,
 //!   small Telegram bots, light web services). Disables the
@@ -10,6 +10,12 @@
 //!   monitoring stack and SMART checks but keeps `mnweb` opt-in.
 //! * `pro` — production / multi-node. Enables everything (`mnweb`,
 //!   monitoring, SMART, k3s placeholders).
+//! * `desktop` — a regular user's PC, not a headless box. Turns off the
+//!   server monitoring stack (nothing is scraping a laptop's metrics),
+//!   keeps SMART checks (a desktop's disk still fails the same way a
+//!   server's does), and drops SSH back to the standard port 22 instead
+//!   of the server-hardened 2222 — a machine that isn't answering SSH
+//!   from the open internet doesn't need the obscurity.
 //!
 //! The profile is persisted in `/etc/monolith/monolith.toml` under
 //! `[system].profile`. Switching profile rewrites the relevant config
@@ -78,6 +84,9 @@ fn list() -> Result<()> {
         println!("    mnweb:      {}", on_off(profile.mnweb));
         println!("    smart:      {}", on_off(profile.smart));
         println!("    notify:     {}", on_off(profile.notifications));
+        println!("    ssh_port:   {}", profile.ssh_port);
+        println!("    hardening:  {}", profile.hardening);
+        println!("    tune:       {}", profile.tune_preset);
         println!();
     }
     Ok(())
@@ -99,6 +108,9 @@ fn show() -> Result<()> {
     println!("  mnweb:      {}", on_off(profile.mnweb));
     println!("  smart:      {}", on_off(profile.smart));
     println!("  notify:     {}", on_off(profile.notifications));
+    println!("  ssh_port:   {}", profile.ssh_port);
+    println!("  hardening:  {}", profile.hardening);
+    println!("  tune:       {}", profile.tune_preset);
     Ok(())
 }
 
@@ -142,6 +154,20 @@ fn set(name: &str, dry_run: bool, config_override: Option<PathBuf>) -> Result<()
     } else {
         println!("  • mnctl web disable       # stop the web UI if running");
     }
+    println!(
+        "  • mnctl security harden --level {}   # apply the {} sysctl/AppArmor set",
+        profile.hardening, profile.name
+    );
+    println!(
+        "  • mnctl tune cpu --preset {}          # matches the {} profile's CPU/power tradeoff",
+        profile.tune_preset, profile.name
+    );
+    if profile.ssh_port != 2222 {
+        println!(
+            "  • sshd is expected on port {} for this profile — update /etc/ssh/sshd_config and firewall rules to match",
+            profile.ssh_port
+        );
+    }
     Ok(())
 }
 
@@ -153,6 +179,18 @@ struct Profile {
     mnweb: bool,
     smart: bool,
     notifications: bool,
+    /// Marks `[system].desktop_mode` — read by anything that needs to
+    /// behave differently on a machine with someone sitting in front
+    /// of it (mnweb's local dashboard, future desktop-only tooling).
+    desktop_mode: bool,
+    /// `[security].ssh_port` — 2222 hides from opportunistic bot scans
+    /// on a box exposed to the internet; a desktop behind a home
+    /// router gets nothing from the obscurity, so it stays on 22.
+    ssh_port: u16,
+    /// Level passed straight to `mnctl security harden --level <..>`.
+    hardening: &'static str,
+    /// Preset passed straight to `mnctl tune cpu --preset <..>`.
+    tune_preset: &'static str,
 }
 
 const PROFILES: &[Profile] = &[
@@ -163,6 +201,10 @@ const PROFILES: &[Profile] = &[
         mnweb: false,
         smart: false,
         notifications: true,
+        desktop_mode: false,
+        ssh_port: 2222,
+        hardening: "server",
+        tune_preset: "powersave",
     },
     Profile {
         name: "full",
@@ -171,6 +213,10 @@ const PROFILES: &[Profile] = &[
         mnweb: false,
         smart: true,
         notifications: true,
+        desktop_mode: false,
+        ssh_port: 2222,
+        hardening: "server",
+        tune_preset: "balanced",
     },
     Profile {
         name: "pro",
@@ -179,6 +225,25 @@ const PROFILES: &[Profile] = &[
         mnweb: true,
         smart: true,
         notifications: true,
+        desktop_mode: false,
+        ssh_port: 2222,
+        hardening: "server",
+        tune_preset: "performance",
+    },
+    Profile {
+        name: "desktop",
+        target: "any regular PC — laptop, workstation, home tower",
+        // Nobody's scraping a laptop's metrics; the heavy monitoring
+        // stack stays off, but mnweb stays on as a lightweight local
+        // system dashboard (it already binds to 127.0.0.1 only).
+        monitoring: false,
+        mnweb: true,
+        smart: true,
+        notifications: true,
+        desktop_mode: true,
+        ssh_port: 22,
+        hardening: "desktop",
+        tune_preset: "balanced",
     },
 ];
 
@@ -233,6 +298,12 @@ fn rewrite_line(section: &str, line: &str, trimmed: &str, profile: &Profile) -> 
     // [system].profile is the source of truth; always update it.
     if section == "system" && trimmed.starts_with("profile") {
         return format!("profile = \"{}\"", profile.name);
+    }
+    if section == "system" && trimmed.starts_with("desktop_mode") {
+        return format!("desktop_mode = {}", profile.desktop_mode);
+    }
+    if section == "security" && trimmed.starts_with("ssh_port") {
+        return format!("ssh_port = {}", profile.ssh_port);
     }
     let (key, value) = match section {
         "monitoring" if trimmed.starts_with("enabled") => ("enabled", profile.monitoring),

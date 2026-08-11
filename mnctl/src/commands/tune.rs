@@ -71,6 +71,15 @@ enum TuneCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Continuously re-tune CPU/IO against live load instead of a one-shot pass
+    Auto {
+        /// Seconds between re-evaluation passes
+        #[arg(long, default_value_t = 300)]
+        interval: u64,
+        /// Run a single evaluation pass and exit (systemd oneshot-friendly)
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -113,6 +122,7 @@ impl TuneArgs {
             }
             TuneCommand::Status => tune_status(),
             TuneCommand::Reset { dry_run } => tune_reset(dry_run),
+            TuneCommand::Auto { interval, once } => tune_auto(interval, once),
         }
     }
 }
@@ -292,6 +302,52 @@ fn tune_reset(dry_run: bool) -> Result<()> {
         println!("  {} defaults restored.", "●".green());
     }
     Ok(())
+}
+
+/// Re-run the CPU + I/O tuning pass on an interval, reading 1-minute
+/// load average each time so the preset can track live load instead of
+/// staying fixed at whatever was applied during install.
+///
+/// Below ~75% of cores busy it settles on `balanced` (schedutil); above
+/// that it pins to `performance`. Every pass also re-applies I/O tuning,
+/// which is idempotent, so this is safe to run from a systemd timer.
+fn tune_auto(interval: u64, once: bool) -> Result<()> {
+    loop {
+        let load = load_average_1m().unwrap_or(0.0);
+        let cores = num_physical_cores().max(1) as f64;
+        let busy_ratio = load / cores;
+
+        let preset = if busy_ratio > 0.75 {
+            CpuPreset::Performance
+        } else {
+            CpuPreset::Balanced
+        };
+
+        println!(
+            "{} load {:.2} across {} cores ({:.0}% busy) → {} preset",
+            "→".blue(),
+            load,
+            cores as usize,
+            busy_ratio * 100.0,
+            format!("{preset:?}").to_lowercase().green()
+        );
+
+        tune_cpu(preset, false)?;
+        tune_io(false)?;
+
+        if once {
+            println!("{} one-shot pass complete", "●".green());
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+    }
+}
+
+/// Read the 1-minute load average from `/proc/loadavg`.
+fn load_average_1m() -> Option<f64> {
+    let content = fs::read_to_string("/proc/loadavg").ok()?;
+    content.split_whitespace().next()?.parse().ok()
 }
 
 // ----- helpers --------------------------------------------------------------

@@ -55,6 +55,37 @@ enum ClusterCommand {
         #[arg(long)]
         no_drain: bool,
     },
+    /// Shared filesystem across cluster nodes
+    Fs(FsArgs),
+    /// Run a command on whichever node currently has the most free memory
+    Schedule {
+        /// Command to run on the chosen node
+        command: String,
+    },
+}
+
+#[derive(Args)]
+pub struct FsArgs {
+    #[command(subcommand)]
+    command: FsCommand,
+}
+
+#[derive(Subcommand)]
+enum FsCommand {
+    /// Mount the shared cluster filesystem at a local path
+    Mount {
+        /// Local mountpoint
+        #[arg(long, default_value = "/mnt/cluster")]
+        at: String,
+    },
+    /// Unmount the shared cluster filesystem
+    Umount {
+        /// Local mountpoint
+        #[arg(long, default_value = "/mnt/cluster")]
+        at: String,
+    },
+    /// Show reachability/replication status of every peer's share
+    SyncStatus,
 }
 
 impl ClusterArgs {
@@ -70,6 +101,12 @@ impl ClusterArgs {
             ClusterCommand::Sync => cluster_sync(),
             ClusterCommand::Deploy { service, nodes } => cluster_deploy(&service, &nodes),
             ClusterCommand::RollingUpdate { image, concurrency, no_drain } => cluster_rolling_update(image.as_deref(), concurrency, no_drain),
+            ClusterCommand::Fs(args) => match args.command {
+                FsCommand::Mount { at } => cluster_fs_mount(&at),
+                FsCommand::Umount { at } => cluster_fs_umount(&at),
+                FsCommand::SyncStatus => cluster_fs_sync_status(),
+            },
+            ClusterCommand::Schedule { command } => cluster_schedule(&command),
         }
     }
 }
@@ -330,5 +367,144 @@ fn cluster_rolling_update(image: Option<&str>, concurrency: u32, no_drain: bool)
 
     println!();
     println!("{} Rolling update complete", "●".green().bold());
+    Ok(())
+}
+
+/// Read peer node addresses out of the config `cluster init` / `cluster
+/// join` already wrote — the same file `cluster_status` prints.
+fn read_peer_nodes() -> Vec<String> {
+    let config_path = "/etc/monolith/cluster/cluster.toml";
+    std::fs::read_to_string(config_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("master_ip") || l.starts_with("advertise_ip"))
+        .filter_map(|l| l.split('"').nth(1))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Mount the shared cluster filesystem. Every peer's `cluster-fs`
+/// directory is layered in under `<at>/<node>` via sshfs, so a file
+/// written on one node shows up on the rest without a separate NFS/
+/// Samba export to hand-configure.
+fn cluster_fs_mount(at: &str) -> Result<()> {
+    let config_path = "/etc/monolith/cluster/cluster.toml";
+    if !std::path::Path::new(config_path).exists() {
+        anyhow::bail!("not in a cluster — run `mnctl cluster init` or `mnctl cluster join` first");
+    }
+
+    std::fs::create_dir_all(at).context("failed to create mountpoint")?;
+
+    let nodes = read_peer_nodes();
+    if nodes.is_empty() {
+        println!(
+            "{} No peer nodes yet — {} is mounted but empty until others join",
+            "⚠".yellow(),
+            at
+        );
+        return Ok(());
+    }
+
+    for node in &nodes {
+        let node_mount = format!("{at}/{node}");
+        std::fs::create_dir_all(&node_mount).ok();
+
+        let status = Command::new("sshfs")
+            .args([
+                &format!("{node}:/var/lib/monolith/cluster-fs"),
+                &node_mount,
+                "-o",
+                "reconnect,ServerAliveInterval=15",
+            ])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => println!("  {} {node} → {node_mount}", "●".green()),
+            _ => println!(
+                "  {} {node} unreachable — {node_mount} unavailable until it comes back",
+                "⚠".yellow()
+            ),
+        }
+    }
+
+    println!("{} Cluster filesystem mounted at {}", "●".green(), at.bold());
+    Ok(())
+}
+
+fn cluster_fs_umount(at: &str) -> Result<()> {
+    for node in read_peer_nodes() {
+        let node_mount = format!("{at}/{node}");
+        let _ = Command::new("fusermount").args(["-u", &node_mount]).status();
+    }
+    println!("{} Cluster filesystem unmounted from {}", "●".green(), at);
+    Ok(())
+}
+
+fn cluster_fs_sync_status() -> Result<()> {
+    let nodes = read_peer_nodes();
+    if nodes.is_empty() {
+        println!("{}", "No peer nodes to check.".yellow());
+        return Ok(());
+    }
+
+    println!("{}", "Cluster FS reachability:".bold().underline());
+    for node in &nodes {
+        let reachable = Command::new("ssh")
+            .args(["-o", "ConnectTimeout=3", "-o", "BatchMode=yes", node, "true"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let (mark, state) = if reachable {
+            ("●".green(), "in sync")
+        } else {
+            ("●".red(), "unreachable")
+        };
+        println!("  {mark} {node:<20} {state}");
+    }
+    Ok(())
+}
+
+/// Pick whichever peer currently has the most free memory and run the
+/// given command there over SSH. Falls back to running locally when
+/// there are no reachable peers, so this is safe to call from a single
+/// node too.
+fn cluster_schedule(command: &str) -> Result<()> {
+    let nodes = read_peer_nodes();
+    let mut best: Option<(String, u64)> = None;
+
+    for node in &nodes {
+        let output = Command::new("ssh")
+            .args([
+                "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+                node, "awk", "/MemAvailable/{print $2}", "/proc/meminfo",
+            ])
+            .output();
+
+        if let Ok(output) = output {
+            if let Ok(kb) = String::from_utf8_lossy(&output.stdout).trim().parse::<u64>() {
+                if best.as_ref().map(|(_, b)| kb > *b).unwrap_or(true) {
+                    best = Some((node.clone(), kb));
+                }
+            }
+        }
+    }
+
+    match best {
+        Some((node, kb)) => {
+            println!("{} Scheduling on {} ({} MB free)", "→".blue(), node.bold(), kb / 1024);
+            let status = Command::new("ssh").args([&node, command]).status()?;
+            if !status.success() {
+                anyhow::bail!("command failed on {node}");
+            }
+        }
+        None => {
+            println!("{} No reachable peers — running locally", "→".blue());
+            let status = Command::new("sh").args(["-c", command]).status()?;
+            if !status.success() {
+                anyhow::bail!("command failed locally");
+            }
+        }
+    }
     Ok(())
 }

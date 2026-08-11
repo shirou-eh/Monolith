@@ -1,14 +1,18 @@
 # Monolith OS Configuration
 # https://github.com/shirou-eh/Monolith
-# Version: 1.2.0 "Onyx"
+# Version: 1.3.0 "Slate"
 
 [system]
 hostname = ""
 timezone = "UTC"
 locale = "en_US.UTF-8"
-# Resource profile: "lite", "full" (default), or "pro". See the README for
-# what each profile enables/disables out of the box.
+# Resource profile: "lite", "full" (default), "pro", or "desktop".
+# See the README for what each profile enables/disables out of the box.
 profile = "full"
+# Set automatically by `mnctl profile set desktop`. Read by anything that
+# should behave differently on a machine with someone sitting in front of
+# it rather than a headless box.
+desktop_mode = false
 
 [update]
 auto_update = false
