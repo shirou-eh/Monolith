@@ -411,6 +411,19 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         let keyboard_layout = &cfg.keyboard_layout;
         let packages = &cfg.packages;
 
+        // systemd-boot is UEFI-only. On BIOS firmware (plenty of VMs
+        // default to SeaBIOS) a freshly installed disk has GPT with no
+        // MBR boot code, so the firmware sits on "boot from disk"
+        // forever — the exact symptom after the first real install.
+        // Detect the boot mode we're running under and pick the loader
+        // accordingly: systemd-boot on UEFI, GRUB (BIOS boot partition
+        // 0xEF02 + i386-pc core.img) on BIOS. The partition numbering
+        // differs between the two layouts, hence esp_part/root_part.
+        let uefi_mode = std::path::Path::new("/sys/firmware/efi").exists();
+        let (esp_n, root_n) = if uefi_mode { (1u8, 2u8) } else { (2u8, 3u8) };
+        let esp_part = format!("{target_disk}{esp_n}");
+        let root_part = format!("{target_disk}{root_n}");
+
         // Aborts the install immediately on a failed critical step
         // instead of letting the rest of spawn_installer march on top
         // of a disk that was never actually partitioned/formatted/
@@ -428,25 +441,50 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
             };
         }
 
-        // Step 1: Partition disk
+        // Step 1: Partition disk. UEFI: ESP + root. BIOS: an
+        // additional 1 MiB BIOS boot partition (0xEF02) up front —
+        // GRUB's i386-pc core.img is embedded there on GPT disks and
+        // grub-install refuses to run without it.
+        let layout = if uefi_mode {
+            vec![
+                "-Z",
+                "-n",
+                "1:0:+512M",
+                "-t",
+                "1:ef00",
+                "-n",
+                "2:0:0",
+                "-t",
+                "2:8300",
+            ]
+        } else {
+            vec![
+                "-Z",
+                "-n",
+                "1:0:+1M",
+                "-t",
+                "1:ef02",
+                "-n",
+                "2:0:+512M",
+                "-t",
+                "2:ef00",
+                "-n",
+                "3:0:0",
+                "-t",
+                "3:8300",
+            ]
+        };
         critical!(
             run_critical_step(
                 &tx,
                 5,
                 &format!("Partitioning {target_disk}..."),
                 "sgdisk",
-                &[
-                    "-Z",
-                    "-n",
-                    "1:0:+512M",
-                    "-t",
-                    "1:ef00",
-                    "-n",
-                    "2:0:0",
-                    "-t",
-                    "2:8300",
-                    &target_disk,
-                ],
+                &{
+                    let mut args = layout.clone();
+                    args.push(&target_disk);
+                    args
+                },
             ),
             format!("Partitioning {target_disk} failed — it may not exist or may be in use.")
         );
@@ -476,7 +514,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                 15,
                 "Formatting EFI partition...",
                 "mkfs.fat",
-                &["-F32", &format!("{target_disk}1")],
+                &["-F32", &esp_part],
             ),
             "Formatting the EFI partition failed."
         );
@@ -487,7 +525,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                     18,
                     "Setting up LUKS encryption...",
                     "cryptsetup",
-                    &["luksFormat", "--batch-mode", &format!("{target_disk}2")],
+                    &["luksFormat", "--batch-mode", &root_part],
                 ),
                 "Setting up LUKS encryption failed."
             );
@@ -497,7 +535,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                     20,
                     "Opening encrypted volume...",
                     "cryptsetup",
-                    &["open", &format!("{target_disk}2"), "cryptroot"],
+                    &["open", &root_part, "cryptroot"],
                 ),
                 "Opening the encrypted volume failed."
             );
@@ -518,7 +556,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                     20,
                     "Formatting root (btrfs)...",
                     "mkfs.btrfs",
-                    &["-f", &format!("{target_disk}2")],
+                    &["-f", &root_part],
                 ),
                 "Formatting the root filesystem failed."
             );
@@ -528,7 +566,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         let root_dev = if use_encryption {
             "/dev/mapper/cryptroot".to_string()
         } else {
-            format!("{target_disk}2")
+            root_part.clone()
         };
         critical!(
             run_critical_step(
@@ -630,7 +668,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                 32,
                 "Mounting EFI system partition...",
                 "mount",
-                &[&format!("{target_disk}1"), "/mnt/boot"]
+                &[&esp_part, "/mnt/boot"]
             ),
             "Mounting the EFI system partition failed."
         );
@@ -659,6 +697,22 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
             ),
             "Installing the base system (pacstrap) failed — check network connectivity and mirror availability."
         );
+
+        // BIOS installs need GRUB — it isn't part of the base set, so
+        // pacstrap it separately (and only when actually needed; a
+        // UEFI install uses systemd-boot and has no use for it).
+        if !uefi_mode {
+            critical!(
+                run_install_step_streaming(
+                    &tx,
+                    36,
+                    "Installing GRUB (BIOS boot)...",
+                    "pacstrap",
+                    &["/mnt", "grub"],
+                ),
+                "Installing GRUB failed."
+            );
+        }
 
         // Step 4b: LUKS needs the `encrypt` mkinitcpio hook to unlock
         // the root device at boot — it is NOT in Arch's default HOOKS
@@ -807,28 +861,45 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
             ],
         );
 
-        // Step 10: Install bootloader
-        critical!(
-            run_critical_step(
-                &tx,
-                78,
-                "Installing bootloader (systemd-boot)...",
-                "arch-chroot",
-                &["/mnt", "bootctl", "install"],
-            ),
-            "Installing the systemd-boot bootloader failed."
-        );
+        // Step 10: Install bootloader. UEFI → systemd-boot, BIOS →
+        // GRUB i386-pc (systemd-boot is UEFI-only; a BIOS machine with
+        // nothing in the MBR just hangs on "boot from disk" forever).
+        if uefi_mode {
+            critical!(
+                run_critical_step(
+                    &tx,
+                    78,
+                    "Installing bootloader (systemd-boot)...",
+                    "arch-chroot",
+                    &["/mnt", "bootctl", "install"],
+                ),
+                "Installing the systemd-boot bootloader failed."
+            );
+        } else {
+            critical!(
+                run_critical_step(
+                    &tx,
+                    78,
+                    "Installing bootloader (GRUB)...",
+                    "arch-chroot",
+                    &[
+                        "/mnt",
+                        "grub-install",
+                        "--target=i386-pc",
+                        "--boot-directory=/boot",
+                        "--force",
+                        &target_disk,
+                    ],
+                ),
+                "Installing the GRUB bootloader failed."
+            );
+        }
 
-        // Step 10b: Write an actual loader entry. `bootctl install`
-        // only puts the systemd-boot EFI binary on the ESP — it does
-        // not create anything pointing at a kernel/initramfs, and
-        // unlike GRUB there's no os-prober-style auto-detection to
-        // fall back on. Without this file the firmware boots straight
-        // into an empty systemd-boot menu with nothing to select,
-        // independently of whether fstab/mounts are correct. This was
-        // the other direct cause of "doesn't even boot".
+        // Kernel command line, shared by both loaders: root by UUID
+        // with the @ subvolume, or the LUKS cryptdevice for encrypted
+        // installs.
         let options = if use_encryption {
-            match blkid_uuid(&format!("{target_disk}2")) {
+            match blkid_uuid(&root_part) {
                 Some(luks_uuid) => format!(
                     "cryptdevice=UUID={luks_uuid}:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw"
                 ),
@@ -840,24 +911,55 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                 None => format!("root={root_dev} rootflags=subvol=@ rw"),
             }
         };
-        let entry = format!(
-            "title   Monolith OS\nlinux   /vmlinuz-linux\ninitrd  /initramfs-linux.img\noptions {options}\n"
-        );
-        let _ = std::fs::create_dir_all("/mnt/boot/loader/entries");
-        let _ = std::fs::write(
-            "/mnt/boot/loader/loader.conf",
-            "default monolith.conf\ntimeout 3\nconsole-mode max\neditor no\n",
-        );
-        match std::fs::write("/mnt/boot/loader/entries/monolith.conf", entry) {
-            Ok(()) => {
-                let _ = tx.send(InstallMsg::Log(
-                    "  [ok] Writing boot loader entry...".to_string(),
-                ));
+
+        // Step 10b: Write an actual loader entry. `bootctl install`
+        // only puts the systemd-boot EFI binary on the ESP — it does
+        // not create anything pointing at a kernel/initramfs, and
+        // unlike GRUB there's no os-prober-style auto-detection to
+        // fall back on. Without this file the firmware boots straight
+        // into an empty systemd-boot menu with nothing to select,
+        // independently of whether fstab/mounts are correct. This was
+        // the other direct cause of "doesn't even boot". The GRUB
+        // equivalent is a small static /boot/grub/grub.cfg with the
+        // same menuentry — grub-mkconfig's auto-detection is irrelevant
+        // here since we already know the exact kernel and options.
+        if uefi_mode {
+            let entry = format!(
+                "title   Monolith OS\nlinux   /vmlinuz-linux\ninitrd  /initramfs-linux.img\noptions {options}\n"
+            );
+            let _ = std::fs::create_dir_all("/mnt/boot/loader/entries");
+            let _ = std::fs::write(
+                "/mnt/boot/loader/loader.conf",
+                "default monolith.conf\ntimeout 3\nconsole-mode max\neditor no\n",
+            );
+            match std::fs::write("/mnt/boot/loader/entries/monolith.conf", entry) {
+                Ok(()) => {
+                    let _ = tx.send(InstallMsg::Log(
+                        "  [ok] Writing boot loader entry...".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(InstallMsg::Log(format!(
+                        "  [err] writing boot loader entry: {e}"
+                    )));
+                }
             }
-            Err(e) => {
-                let _ = tx.send(InstallMsg::Log(format!(
-                    "  [err] writing boot loader entry: {e}"
-                )));
+        } else {
+            let cfg = format!(
+                "set timeout=3\nset default=0\nmenuentry \"Monolith OS\" {{\n    linux /vmlinuz-linux {options}\n    initrd /initramfs-linux.img\n}}\n"
+            );
+            let _ = std::fs::create_dir_all("/mnt/boot/grub");
+            match std::fs::write("/mnt/boot/grub/grub.cfg", cfg) {
+                Ok(()) => {
+                    let _ = tx.send(InstallMsg::Log(
+                        "  [ok] Writing GRUB configuration...".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(InstallMsg::Log(format!(
+                        "  [err] writing GRUB configuration: {e}"
+                    )));
+                }
             }
         }
 
@@ -1480,6 +1582,13 @@ fn render_packages(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
 }
 
 fn render_review(f: &mut Frame, app: &InstallerApp, area: Rect) {
+    // The bootloader choice is decided by the firmware we're running
+    // under, so show it in the summary before the user commits.
+    let boot_mode = if std::path::Path::new("/sys/firmware/efi").exists() {
+        "UEFI (systemd-boot)"
+    } else {
+        "BIOS (GRUB)"
+    };
     let selected_pkgs: Vec<&str> = app
         .packages
         .iter()
@@ -1492,6 +1601,7 @@ fn render_review(f: &mut Frame, app: &InstallerApp, area: Rect) {
          ═══════════════════════\n\n  \
          Keyboard:   {}\n  \
          Disk:       {}\n  \
+         Boot:       {}\n  \
          Encryption: {}\n  \
          Timezone:   {}\n  \
          Hostname:   {}\n  \
@@ -1504,6 +1614,7 @@ fn render_review(f: &mut Frame, app: &InstallerApp, area: Rect) {
         } else {
             &app.disk
         },
+        boot_mode,
         if app.use_encryption { "LUKS2" } else { "none" },
         app.timezone,
         if app.hostname.is_empty() {

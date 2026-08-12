@@ -65,6 +65,19 @@ rescoped and what was dropped and why.
 - `monolith-installer` `--help` was silently ignored and crashed with
   a bare "No such device or address" outside a real TTY. It now prints
   help/version; the TUI still needs a real terminal and says so.
+- `monolith-installer` installed systemd-boot unconditionally — but
+  systemd-boot is UEFI-only. On BIOS firmware (SeaBIOS is the default
+  in many VMs) the fresh GPT disk had no MBR boot code and the machine
+  hung on "boot from disk" forever. The installer now detects the
+  boot mode: systemd-boot on UEFI, GRUB (BIOS boot partition + i386-pc
+  core.img) on BIOS, with the matching partition layout for each.
+- `monolith-installer` offered the live medium's loop devices
+  (`/dev/loop0` — the archiso squashfs root itself) as install
+  targets; sgdisk can't repartition them and the install aborted with
+  a confusing error. Loop/ram/zram/dm-/fd/nbd/sr devices are now
+  filtered out of the disk list, and an empty list shows an
+  explanation instead of letting the install proceed against a
+  non-existent /dev/sda.
 - `monolith-installer` Keyboard/Timezone/Network/UserCreation/Packages
   steps had no key handling at all — layout/timezone/packages could
   never be changed and hostname/username could never be typed.
