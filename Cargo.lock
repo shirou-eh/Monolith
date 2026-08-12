@@ -1230,6 +1230,7 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "indicatif",
+ "monolith-sign",
  "nix",
  "ratatui",
  "reqwest",
@@ -1256,6 +1257,7 @@ dependencies = [
  "colored",
  "dialoguer",
  "indicatif",
+ "monolith-sign",
  "reqwest",
  "serde",
  "serde_json",
@@ -1305,6 +1307,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "which",
+]
+
+[[package]]
+name = "monolith-sign"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

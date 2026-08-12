@@ -108,12 +108,24 @@ enum RepoCommand {
         packages: Vec<String>,
         #[arg(long, default_value = "monolith")]
         name: String,
+        /// GPG-sign the database and every package file. Uses the
+        /// default secret key in the local keyring if given with no
+        /// value, or a specific one if a key ID/fingerprint/email is
+        /// given. Without this, every machine that adds this repo has
+        /// to run with SigLevel = Optional TrustAll — no verification
+        /// at all.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        sign: Option<String>,
     },
     /// Rebuild the repo database from whatever package files are already in the directory
     Build {
         path: String,
         #[arg(long, default_value = "monolith")]
         name: String,
+        /// See `repo add --sign` — same behavior, applied to whatever
+        /// package files are already in the directory.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        sign: Option<String>,
     },
     /// Serve the repo directory over plain HTTP
     Serve {
@@ -169,8 +181,9 @@ async fn main() -> Result<()> {
                 path,
                 packages,
                 name,
-            } => repo_add(&path, &packages, &name),
-            RepoCommand::Build { path, name } => repo_build(&path, &name),
+                sign,
+            } => repo_add(&path, &packages, &name, sign.as_deref()),
+            RepoCommand::Build { path, name, sign } => repo_build(&path, &name, sign.as_deref()),
             RepoCommand::Serve { path, port } => repo_serve(&path, port),
             RepoCommand::Snippet { url, name } => {
                 repo_snippet(&url, &name);
@@ -716,6 +729,47 @@ async fn self_update_monolith(force: bool, version: Option<&str>) -> Result<()> 
     }
 
     let bytes = resp.bytes().await.context("failed to read response body")?;
+
+    // Verify against the Monolith release signing key before this
+    // touches disk anywhere real. TLS already protects the download in
+    // transit; this protects against a compromised or tampered release
+    // artifact itself — the actual supply-chain risk for something
+    // that gets extracted straight into /usr/local/bin and run as
+    // root. A missing .sig (releases published before this existed)
+    // warns loudly instead of hard-failing; a .sig that exists but
+    // doesn't verify always aborts.
+    let sig_name = format!("{}.sig", asset.name);
+    match release.assets.iter().find(|a| a.name == sig_name) {
+        Some(sig_asset) => {
+            println!("  {} Verifying signature ({})...", "→".blue(), sig_name);
+            let sig_resp = client
+                .get(&sig_asset.browser_download_url)
+                .send()
+                .await
+                .with_context(|| format!("failed to download {sig_name}"))?;
+            if !sig_resp.status().is_success() {
+                anyhow::bail!(
+                    "signature download failed with HTTP {} for {sig_name}",
+                    sig_resp.status()
+                );
+            }
+            let sig_bytes = sig_resp
+                .bytes()
+                .await
+                .context("failed to read signature response body")?;
+            monolith_sign::verify_detached(&bytes, &sig_bytes)
+                .context("refusing to install an unverified release artifact")?;
+            println!("  {} Signature verified", "✓".green());
+        }
+        None => {
+            println!(
+                "  {} No signature published for {} — proceeding unverified (release predates signing)",
+                "⚠".yellow(),
+                asset.name
+            );
+        }
+    }
+
     let tmp = "/tmp/mnpkg-self-update.tar.gz";
     std::fs::write(tmp, &bytes).context("failed to write tarball to /tmp")?;
 
@@ -820,7 +874,38 @@ fn repo_package_files(path: &str) -> Result<Vec<String>> {
     Ok(files)
 }
 
-fn run_repo_add(path: &str, name: &str) -> Result<()> {
+/// GPG-sign a single file in place (writes `<file>.sig` next to it),
+/// skipping if that signature already exists and is newer than the
+/// file — repeated `repo add`/`repo build` runs over an unchanged
+/// package shouldn't re-sign it every time. `key` is `""` for "use
+/// gpg's default secret key" or a specific key ID/fingerprint/email.
+fn gpg_sign_file(file: &str, key: &str) -> Result<()> {
+    let sig_path = format!("{file}.sig");
+    if let (Ok(sig_meta), Ok(file_meta)) = (std::fs::metadata(&sig_path), std::fs::metadata(file)) {
+        if let (Ok(sig_time), Ok(file_time)) = (sig_meta.modified(), file_meta.modified()) {
+            if sig_time >= file_time {
+                return Ok(());
+            }
+        }
+    }
+
+    let mut cmd = Command::new("gpg");
+    cmd.args(["--batch", "--yes", "--detach-sign"]);
+    if !key.is_empty() {
+        cmd.args(["--local-user", key]);
+    }
+    cmd.arg(file);
+    let output = cmd.output().context("failed to run gpg --detach-sign")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to sign {file}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn run_repo_add(path: &str, name: &str, sign: Option<&str>) -> Result<()> {
     if which::which("repo-add").is_err() {
         anyhow::bail!("repo-add not found — install pacman-contrib");
     }
@@ -830,8 +915,24 @@ fn run_repo_add(path: &str, name: &str) -> Result<()> {
         anyhow::bail!("no .pkg.tar.* files in {path} yet");
     }
 
+    if let Some(key) = sign {
+        if which::which("gpg").is_err() {
+            anyhow::bail!("--sign requires gpg — install gnupg");
+        }
+        println!("{} Signing {} package(s)...", "→".blue(), files.len());
+        for file in &files {
+            gpg_sign_file(file, key)?;
+        }
+    }
+
     let db_path = format!("{path}/{name}.db.tar.gz");
     let mut cmd = Command::new("repo-add");
+    if let Some(key) = sign {
+        cmd.arg("-s");
+        if !key.is_empty() {
+            cmd.args(["-k", key]);
+        }
+    }
     cmd.arg(&db_path);
     cmd.args(&files);
     let status = cmd.status().context("failed to run repo-add")?;
@@ -840,14 +941,32 @@ fn run_repo_add(path: &str, name: &str) -> Result<()> {
     }
 
     println!(
-        "{} {name}.db.tar.gz rebuilt ({} package(s))",
+        "{} {name}.db.tar.gz rebuilt ({} package(s){})",
         "●".green(),
-        files.len()
+        files.len(),
+        if sign.is_some() { ", signed" } else { "" }
     );
+
+    if sign.is_some() {
+        println!();
+        println!(
+            "{} Signed. On other machines, add to /etc/pacman.conf:",
+            "→".blue()
+        );
+        println!();
+        repo_snippet_signed(&format!("file://{path}"), name);
+    } else {
+        println!(
+            "{} Unsigned — re-run with {} to sign the database and packages",
+            "⚠".yellow(),
+            "--sign".bold()
+        );
+    }
+
     Ok(())
 }
 
-fn repo_add(path: &str, packages: &[String], name: &str) -> Result<()> {
+fn repo_add(path: &str, packages: &[String], name: &str, sign: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("failed to create {path}"))?;
 
     for pkg in packages {
@@ -866,11 +985,11 @@ fn repo_add(path: &str, packages: &[String], name: &str) -> Result<()> {
         println!("  {} {}", "●".green(), filename.to_string_lossy());
     }
 
-    run_repo_add(path, name)
+    run_repo_add(path, name, sign)
 }
 
-fn repo_build(path: &str, name: &str) -> Result<()> {
-    run_repo_add(path, name)
+fn repo_build(path: &str, name: &str, sign: Option<&str>) -> Result<()> {
+    run_repo_add(path, name, sign)
 }
 
 /// Minimal read-only static file server — enough for `pacman -Sy` to pull
@@ -958,8 +1077,32 @@ fn urlencoding_decode(s: &str) -> String {
     out
 }
 
+/// Snippet for an unsigned repo — `TrustAll` means literally no
+/// verification of anything this repo serves. Only correct when the
+/// repo genuinely isn't signed (nothing else to check against); once
+/// `repo add`/`repo build --sign` has run, use
+/// [`repo_snippet_signed`] instead.
 fn repo_snippet(url: &str, name: &str) {
     println!("[{name}]");
     println!("SigLevel = Optional TrustAll");
     println!("Server = {url}");
+    println!();
+    println!(
+        "# Unsigned — no verification. Sign with `mnpkg repo add/build --sign`,\n\
+         # then use `mnpkg repo snippet` output again for the SigLevel = Required block."
+    );
+}
+
+/// Snippet for a repo whose database and packages are actually signed.
+/// Required (not Optional) — a repo that went to the trouble of
+/// signing should have that enforced, not silently ignored by a
+/// client's pacman.conf that never asks for verification.
+fn repo_snippet_signed(url: &str, name: &str) {
+    println!("[{name}]");
+    println!("SigLevel = Required");
+    println!("Server = {url}");
+    println!();
+    println!(
+        "# Import the repo's public key first: pacman-key --add <keyfile> && pacman-key --lsign-key <keyid>"
+    );
 }

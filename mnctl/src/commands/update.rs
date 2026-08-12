@@ -361,6 +361,47 @@ async fn self_update(force: bool, version: Option<&str>) -> Result<()> {
     }
 
     let bytes = resp.bytes().await.context("failed to read response body")?;
+
+    // Verify against the Monolith release signing key before this
+    // touches disk anywhere real — same reasoning as mnpkg's copy of
+    // this (see monolith-sign's crate docs): TLS covers the wire, this
+    // covers a compromised or tampered release artifact, which matters
+    // a lot more for something about to be extracted into
+    // /usr/local/bin and run as root. Missing .sig (pre-signing
+    // releases) warns and continues; a present-but-broken .sig always
+    // aborts.
+    let sig_name = format!("{}.sig", asset.name);
+    match release.assets.iter().find(|a| a.name == sig_name) {
+        Some(sig_asset) => {
+            println!("  {} Verifying signature ({})...", "→".blue(), sig_name);
+            let sig_resp = client
+                .get(&sig_asset.browser_download_url)
+                .send()
+                .await
+                .with_context(|| format!("failed to download {sig_name}"))?;
+            if !sig_resp.status().is_success() {
+                anyhow::bail!(
+                    "signature download failed with HTTP {} for {sig_name}",
+                    sig_resp.status()
+                );
+            }
+            let sig_bytes = sig_resp
+                .bytes()
+                .await
+                .context("failed to read signature response body")?;
+            monolith_sign::verify_detached(&bytes, &sig_bytes)
+                .context("refusing to install an unverified release artifact")?;
+            println!("  {} Signature verified", "✓".green());
+        }
+        None => {
+            println!(
+                "  {} No signature published for {} — proceeding unverified (release predates signing)",
+                "⚠".yellow(),
+                asset.name
+            );
+        }
+    }
+
     let tmp = "/tmp/monolith-update.tar.gz";
     std::fs::write(tmp, &bytes).context("failed to write tarball to /tmp")?;
 
@@ -368,9 +409,12 @@ async fn self_update(force: bool, version: Option<&str>) -> Result<()> {
     let install_dir = "/usr/local/bin";
     println!("  {} Extracting to {}...", "→".blue(), install_dir);
 
-    let tar_cmd = format!("tar -xzf {tmp} -C {install_dir} 2>&1");
-    let output = Command::new("sh")
-        .args(["-c", &tar_cmd])
+    // Direct argv, not `sh -c` — matches mnpkg's copy of this same
+    // self-update flow. tmp/install_dir are fixed constants so there's
+    // no injection risk either way, but one exec pattern to audit
+    // instead of two.
+    let output = Command::new("tar")
+        .args(["-xzf", tmp, "-C", install_dir])
         .output()
         .context("failed to extract tarball")?;
 

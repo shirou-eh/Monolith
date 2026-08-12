@@ -1,0 +1,10 @@
+[package]
+name = "monolith-sign"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Release artifact signature verification shared by mnctl and mnpkg self-update"
+
+[dependencies]
+anyhow = "1"

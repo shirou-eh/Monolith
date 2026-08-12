@@ -1,5 +1,5 @@
 [workspace]
-members = ["mnctl", "mnpkg", "installer", "mnweb"]
+members = ["mnctl", "mnpkg", "installer", "mnweb", "monolith-sign"]
 resolver = "2"
 
 [workspace.package]

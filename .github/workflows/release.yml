@@ -54,11 +54,27 @@ jobs:
           done
           tar czf "monolith-${{ matrix.target }}.tar.gz" -C release .
 
+      # Signs with the Monolith release signing key so `mnctl update
+      # --self` / `mnpkg update --self` (monolith-sign crate) can
+      # verify the download instead of trusting HTTPS alone. Gated on
+      # the secret existing so this is a no-op — not a failure — until
+      # MONOLITH_RELEASE_SIGNING_KEY is actually configured; every
+      # release before that point just makes self-update print its
+      # "no signature published" warning instead of verifying, which
+      # is the documented fallback, not a broken state.
+      - name: Sign release tarball
+        if: ${{ secrets.MONOLITH_RELEASE_SIGNING_KEY != '' }}
+        run: |
+          echo "${{ secrets.MONOLITH_RELEASE_SIGNING_KEY }}" | gpg --batch --quiet --import
+          gpg --batch --yes --detach-sign "monolith-${{ matrix.target }}.tar.gz"
+
       - name: Upload binary tarball
         uses: actions/upload-artifact@v4
         with:
           name: monolith-${{ matrix.target }}
-          path: monolith-${{ matrix.target }}.tar.gz
+          path: |
+            monolith-${{ matrix.target }}.tar.gz
+            monolith-${{ matrix.target }}.tar.gz.sig
 
   # Stage 2 — build the three ISO tiers (lite / full / pro) on an Arch
   # Linux container so mkarchiso is available. Each ISO embeds the
@@ -171,6 +187,7 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             artifacts/**/*.tar.gz
+            artifacts/**/*.tar.gz.sig
             artifacts/**/*.iso
             artifacts/**/*.sha256
           body: |
@@ -197,4 +214,15 @@ jobs:
 
             ```
             sha256sum -c monolith-<version>-<tier>-x86_64.iso.sha256
+            ```
+
+            Binary tarballs are GPG-signed with the Monolith release
+            signing key (fingerprint `4182DA5ED0EEB0B7BB575D1FF734D598C75742E6`).
+            `mnctl update --self` / `mnpkg update --self` verify this
+            automatically — the embedded key lives in the
+            `monolith-sign` crate. To check by hand:
+
+            ```
+            gpg --import monolith-sign/monolith-release-signing.asc
+            gpg --verify monolith-<arch>.tar.gz.sig monolith-<arch>.tar.gz
             ```
