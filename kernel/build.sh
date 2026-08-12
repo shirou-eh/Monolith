@@ -47,6 +47,7 @@ die() {
 KERNEL_VERSION=""
 CONFIG_ONLY=false
 NO_INSTALL=false
+PROFILE="server"
 
 for arg in "$@"; do
     case "${arg}" in
@@ -59,6 +60,13 @@ for arg in "$@"; do
         --no-install)
             NO_INSTALL=true
             ;;
+        --profile=*)
+            PROFILE="${arg#*=}"
+            case "${PROFILE}" in
+                server|desktop) ;;
+                *) die "Unknown --profile '${PROFILE}'. Use 'server' or 'desktop'." ;;
+            esac
+            ;;
         --help|-h)
             echo "Monolith Kernel Build Script"
             echo ""
@@ -68,6 +76,10 @@ for arg in "$@"; do
             echo "  --version=VERSION  Build specific kernel version (default: latest stable)"
             echo "  --config-only      Only generate config, don't build"
             echo "  --no-install       Build but don't install"
+            echo "  --profile=PROFILE  'server' (default) or 'desktop' — desktop layers"
+            echo "                     configs/<arch>-desktop.config on top of the base"
+            echo "                     config to re-enable USB HID, DRM/GPU, sound,"
+            echo "                     wifi and Bluetooth for non-headless hardware."
             echo "  --help, -h         Show this help"
             exit 0
             ;;
@@ -166,22 +178,41 @@ apply_patches() {
 }
 
 select_config() {
-    local arch
+    local arch base_config desktop_config
     arch="$(uname -m)"
 
     case "${arch}" in
         x86_64)
             info "Using x86_64 kernel config"
-            cp "${CONFIGS_DIR}/x86_64.config" "${KERNEL_SRC_DIR}/.config"
+            base_config="${CONFIGS_DIR}/x86_64.config"
+            desktop_config="${CONFIGS_DIR}/x86_64-desktop.config"
             ;;
         aarch64)
             info "Using ARM64 kernel config"
-            cp "${CONFIGS_DIR}/arm64.config" "${KERNEL_SRC_DIR}/.config"
+            base_config="${CONFIGS_DIR}/arm64.config"
+            desktop_config="${CONFIGS_DIR}/arm64-desktop.config"
             ;;
         *)
             die "Unsupported architecture: ${arch}"
             ;;
     esac
+
+    cp "${base_config}" "${KERNEL_SRC_DIR}/.config"
+
+    if [[ "${PROFILE}" == "desktop" ]]; then
+        if [[ ! -f "${desktop_config}" ]]; then
+            die "--profile=desktop requested but ${desktop_config} doesn't exist"
+        fi
+        info "Layering desktop overlay (${desktop_config}) — USB HID, DRM/GPU, sound, wifi, Bluetooth"
+        # merge_config.sh (shipped by the kernel itself) is the correct
+        # tool for this, not `cat`ing fragments together: it properly
+        # overrides earlier values and warns about anything the fragment
+        # asked for that didn't survive resolution, which is exactly how
+        # the USB/PCI/MODULES gaps below were originally caught. -m only
+        # merges into .config; the olddefconfig call right after this
+        # block is what actually resolves it.
+        (cd "${KERNEL_SRC_DIR}" && scripts/kconfig/merge_config.sh -m .config "${desktop_config}") 2>&1 | tee -a "${LOG_FILE}"
+    fi
 
     # configs/*.config is a curated fragment (the options Monolith actually
     # cares about), not a complete .config — every symbol it doesn't mention
@@ -377,6 +408,16 @@ main() {
     info "Target kernel version: ${KERNEL_VERSION}"
 
     if ${CONFIG_ONLY}; then
+        # select_config() needs a real, extracted kernel tree to run
+        # olddefconfig/merge_config.sh against — on a fresh checkout
+        # (no prior build ever run) KERNEL_SRC_DIR doesn't exist yet,
+        # so skipping straight to select_config died with "no such
+        # file or directory" despite --config-only's own help text
+        # promising just "generate config, don't build". Only ever
+        # worked before by accident, when a previous full build had
+        # already left a source tree behind.
+        download_kernel "${KERNEL_VERSION}"
+        extract_kernel "${KERNEL_VERSION}"
         select_config
         info "Config generated at ${KERNEL_SRC_DIR}/.config"
         exit 0
