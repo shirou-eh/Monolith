@@ -64,6 +64,19 @@ lshw
 docker
 docker-compose
 
+# --- Cluster / package management dependencies ---
+# etcd: `mnctl cluster init/join/quorum` shells out to etcd/etcdctl for
+# real Raft-backed quorum — required by nothing else, so it has to be
+# listed explicitly or a fresh install can't form a cluster at all.
+# pacman-contrib: provides repo-add, required by `mnpkg repo add/build`
+# (also required by nothing else — same story).
+# gnupg (gpg) is NOT listed here: pacman itself hard-depends on it for
+# official-repo signature verification, so it's already guaranteed
+# present. Used by monolith-sign (self-update verification) and
+# `mnpkg repo --sign`.
+etcd
+pacman-contrib
+
 # --- Monolith control surfaces ---
 # These are not in the official Arch repos; the ISO builder vendors the
 # release tarball into airootfs/usr/local/bin/.

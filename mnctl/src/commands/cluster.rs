@@ -34,6 +34,10 @@ enum ClusterCommand {
     Nodes,
     /// Show cluster health overview
     Status,
+    /// Show real Raft quorum health via etcd — who's leader, whether a
+    /// majority is currently reachable. This is what `rolling-update`
+    /// gates on before touching anything.
+    Quorum,
     /// Force config sync across all nodes
     Sync,
     /// Deploy a service to cluster node(s)
@@ -132,6 +136,7 @@ impl ClusterArgs {
             ClusterCommand::Leave => cluster_leave(),
             ClusterCommand::Nodes => cluster_nodes(),
             ClusterCommand::Status => cluster_status(),
+            ClusterCommand::Quorum => cluster_quorum(),
             ClusterCommand::Sync => cluster_sync(),
             ClusterCommand::Deploy { service, nodes } => cluster_deploy(&service, &nodes),
             ClusterCommand::RollingUpdate {
@@ -225,6 +230,241 @@ fn detect_local_ip() -> Result<String> {
     )
 }
 
+// --- etcd-backed quorum ---------------------------------------------
+//
+// Before this, "master"/"worker" in cluster.toml was just a label —
+// nothing ever elected a leader or agreed on cluster membership, and
+// nothing could tell the difference between "a peer is unreachable"
+// and "we've lost quorum and shouldn't be accepting writes anywhere".
+// etcd is a proven Raft implementation; the right call here is to run
+// it as the actual consensus layer rather than hand-roll one. This
+// section wraps `etcd`/`etcdctl` the same way the rest of this file
+// wraps `ssh`/`systemctl` — shelling out, not a Rust etcd client, for
+// the same one-thing-to-audit reason the update-tarball extraction
+// uses direct argv instead of `sh -c`.
+//
+// Verified against a real local 3-node etcd cluster before any of this
+// was wired up: bootstrap, `member add`-based join, leader election,
+// and failover (killing the leader, confirming the survivors re-elect
+// and keep serving) — see the commit message for how.
+
+const ETCD_CLIENT_PORT: u16 = 2379;
+const ETCD_PEER_PORT: u16 = 2380;
+const ETCD_DATA_DIR: &str = "/var/lib/monolith/etcd";
+const ETCD_UNIT_PATH: &str = "/etc/systemd/system/monolith-etcd.service";
+const ETCD_UNIT_NAME: &str = "monolith-etcd.service";
+const CLUSTER_CONFIG_DIR: &str = "/etc/monolith/cluster";
+const CLUSTER_CONFIG_PATH: &str = "/etc/monolith/cluster/cluster.toml";
+
+fn etcd_client_url(ip: &str) -> String {
+    format!("http://{ip}:{ETCD_CLIENT_PORT}")
+}
+
+fn etcd_peer_url(ip: &str) -> String {
+    format!("http://{ip}:{ETCD_PEER_PORT}")
+}
+
+/// systemd unit for the local etcd member. `Type=notify` + etcd's own
+/// sd_notify support means systemd genuinely waits for etcd to finish
+/// joining the cluster (not just forking) before `--now` returns —
+/// callers don't need their own sleep-and-poll after starting this.
+fn etcd_unit_content(name: &str, advertise_ip: &str, initial_cluster: &str, state: &str) -> String {
+    format!(
+        "[Unit]\n\
+         Description=Monolith cluster etcd (Raft quorum/consensus)\n\
+         Documentation=https://etcd.io/docs\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\
+         \n\
+         [Service]\n\
+         Type=notify\n\
+         User=root\n\
+         ExecStart=/usr/bin/etcd \\\n\
+         \x20 --name {name} \\\n\
+         \x20 --data-dir {ETCD_DATA_DIR} \\\n\
+         \x20 --listen-client-urls http://0.0.0.0:{ETCD_CLIENT_PORT} \\\n\
+         \x20 --advertise-client-urls {} \\\n\
+         \x20 --listen-peer-urls http://0.0.0.0:{ETCD_PEER_PORT} \\\n\
+         \x20 --initial-advertise-peer-urls {} \\\n\
+         \x20 --initial-cluster {initial_cluster} \\\n\
+         \x20 --initial-cluster-state {state}\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         LimitNOFILE=65536\n\
+         \n\
+         [Install]\n\
+         WantedBy=multi-user.target\n",
+        etcd_client_url(advertise_ip),
+        etcd_peer_url(advertise_ip),
+    )
+}
+
+/// Write the unit, reload systemd, enable+start it, and wait (systemd
+/// itself does the waiting, via Type=notify) for etcd to report ready.
+fn install_and_start_etcd(unit: &str) -> Result<()> {
+    std::fs::create_dir_all(ETCD_DATA_DIR).context("failed to create etcd data dir")?;
+    std::fs::write(ETCD_UNIT_PATH, unit).context("failed to write etcd systemd unit")?;
+
+    let reload = Command::new("systemctl")
+        .arg("daemon-reload")
+        .status()
+        .context("failed to run systemctl daemon-reload")?;
+    if !reload.success() {
+        anyhow::bail!("systemctl daemon-reload failed");
+    }
+
+    let enable = Command::new("systemctl")
+        .args(["enable", "--now", ETCD_UNIT_NAME])
+        .status()
+        .context("failed to start monolith-etcd.service")?;
+    if !enable.success() {
+        anyhow::bail!("failed to start {ETCD_UNIT_NAME} — check `journalctl -u {ETCD_UNIT_NAME}`");
+    }
+    Ok(())
+}
+
+/// `etcdctl member add` on `via_ip`'s etcd (over SSH — same
+/// connectivity assumption every other cluster command here already
+/// makes) and parse the `ETCD_INITIAL_CLUSTER=...` / `ETCD_INITIAL_CLUSTER_STATE=...`
+/// lines it prints. This is etcd's own documented dynamic-membership
+/// workflow, not something reverse-engineered — verified against a
+/// real etcd binary's actual output before relying on the format.
+fn etcd_member_add(via_ip: &str, new_name: &str, new_ip: &str) -> Result<String> {
+    let peer_url = etcd_peer_url(new_ip);
+    let output = Command::new("ssh")
+        .args([
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            via_ip,
+            "etcdctl",
+            &format!("--endpoints={}", etcd_client_url(via_ip)),
+            "member",
+            "add",
+            new_name,
+            &format!("--peer-urls={peer_url}"),
+        ])
+        .output()
+        .with_context(|| format!("failed to ssh to {via_ip} to run etcdctl member add"))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "etcdctl member add failed on {via_ip}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let initial_cluster = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ETCD_INITIAL_CLUSTER="))
+        .map(|s| s.trim_matches('"').to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "etcdctl member add on {via_ip} didn't print ETCD_INITIAL_CLUSTER — unexpected etcdctl output:\n{stdout}"
+            )
+        })?;
+
+    Ok(initial_cluster)
+}
+
+/// `etcdctl endpoint health` against every etcd client URL, run
+/// locally (etcd's own client-to-cluster forwarding means this only
+/// needs one reachable endpoint, but passing all of them lets a
+/// completely dead node still get reported instead of silently
+/// dropped from the picture).
+fn etcd_endpoint_health(client_urls: &[String]) -> Vec<(String, bool)> {
+    client_urls
+        .iter()
+        .map(|url| {
+            let ok = Command::new("etcdctl")
+                .args(["--endpoints", url, "endpoint", "health"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            (url.clone(), ok)
+        })
+        .collect()
+}
+
+/// Every etcd client URL for the local cluster, self + peers, read
+/// from cluster.toml's `advertise_ip`/`peer_ips` — see
+/// `read_all_member_ips`.
+fn cluster_member_client_urls() -> Vec<String> {
+    read_all_member_ips()
+        .iter()
+        .map(|ip| etcd_client_url(ip))
+        .collect()
+}
+
+/// All member IPs this node knows about: itself (from `advertise_ip`
+/// on a master or detected locally on a worker) plus every
+/// `master_ip`/peer entry already read by [`read_peer_nodes`]. Used
+/// for etcd endpoint health checks, not SSH reachability — a
+/// different question (an unreachable-over-SSH node can still be a
+/// perfectly healthy etcd member if only the SSH port is firewalled).
+fn read_all_member_ips() -> Vec<String> {
+    let mut ips: Vec<String> = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(CLUSTER_CONFIG_PATH) {
+        for line in content.lines() {
+            if line.starts_with("advertise_ip") || line.starts_with("master_ip") {
+                if let Some(ip) = line.split('"').nth(1) {
+                    ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+    ips.extend(read_peer_nodes());
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// Real quorum status: healthy member count vs. total, and whether
+/// that's a majority. `(healthy, total, has_quorum)`.
+fn quorum_health() -> (usize, usize, bool) {
+    let urls = cluster_member_client_urls();
+    if urls.is_empty() {
+        return (0, 0, false);
+    }
+    let results = etcd_endpoint_health(&urls);
+    let healthy = results.iter().filter(|(_, ok)| *ok).count();
+    let total = results.len();
+    (healthy, total, healthy * 2 > total)
+}
+
+fn cluster_quorum() -> Result<()> {
+    if !std::path::Path::new(CLUSTER_CONFIG_PATH).exists() {
+        println!("{}", "Not in a cluster.".yellow());
+        return Ok(());
+    }
+    let (healthy, total, has_quorum) = quorum_health();
+    println!("{}", "Cluster Quorum:".bold().underline());
+    for (url, ok) in etcd_endpoint_health(&cluster_member_client_urls()) {
+        let mark = if ok { "●".green() } else { "●".red() };
+        let state = if ok {
+            "healthy".green()
+        } else {
+            "unreachable".red()
+        };
+        println!("  {mark} {url:<28} {state}");
+    }
+    println!();
+    if has_quorum {
+        println!(
+            "{} Quorum OK — {healthy}/{total} members healthy",
+            "●".green().bold()
+        );
+    } else {
+        println!(
+            "{} QUORUM LOST — only {healthy}/{total} members healthy, need a majority",
+            "●".red().bold()
+        );
+    }
+    Ok(())
+}
+
 fn cluster_init(name: Option<&str>, advertise_ip: Option<&str>) -> Result<()> {
     let cluster_name = name.unwrap_or("monolith-cluster");
 
@@ -233,8 +473,12 @@ fn cluster_init(name: Option<&str>, advertise_ip: Option<&str>) -> Result<()> {
         None => detect_local_ip().context("failed to detect IP")?,
     };
 
-    let config_dir = "/etc/monolith/cluster";
-    std::fs::create_dir_all(config_dir).context("failed to create cluster config directory")?;
+    let hostname = nix::unistd::gethostname()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "node".to_string());
+
+    std::fs::create_dir_all(CLUSTER_CONFIG_DIR)
+        .context("failed to create cluster config directory")?;
 
     let token = generate_token();
 
@@ -243,16 +487,23 @@ fn cluster_init(name: Option<&str>, advertise_ip: Option<&str>) -> Result<()> {
          name = \"{cluster_name}\"\n\
          role = \"master\"\n\
          advertise_ip = \"{ip}\"\n\
+         node_name = \"{hostname}\"\n\
          token = \"{token}\"\n\
          \n\
          [etcd]\n\
-         data_dir = \"/var/lib/monolith/etcd\"\n\
-         listen_client_urls = \"http://{ip}:2379\"\n\
-         advertise_client_urls = \"http://{ip}:2379\"\n"
+         data_dir = \"{ETCD_DATA_DIR}\"\n\
+         listen_client_urls = \"{}\"\n\
+         advertise_client_urls = \"{}\"\n",
+        etcd_client_url(&ip),
+        etcd_client_url(&ip),
     );
 
-    std::fs::write(format!("{config_dir}/cluster.toml"), &config)
-        .context("failed to write cluster config")?;
+    std::fs::write(CLUSTER_CONFIG_PATH, &config).context("failed to write cluster config")?;
+
+    println!("{} Bootstrapping etcd (Raft quorum layer)...", "→".blue());
+    let initial_cluster = format!("{hostname}={}", etcd_peer_url(&ip));
+    let unit = etcd_unit_content(&hostname, &ip, &initial_cluster, "new");
+    install_and_start_etcd(&unit)?;
 
     println!(
         "{} Cluster '{}' initialized",
@@ -272,39 +523,164 @@ fn cluster_init(name: Option<&str>, advertise_ip: Option<&str>) -> Result<()> {
 }
 
 fn cluster_join(master_ip: &str, token: &str) -> Result<()> {
-    let config_dir = "/etc/monolith/cluster";
-    std::fs::create_dir_all(config_dir)?;
+    std::fs::create_dir_all(CLUSTER_CONFIG_DIR)?;
 
     let hostname = nix::unistd::gethostname()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "node".to_string());
+    let my_ip = detect_local_ip().context("failed to detect this node's IP")?;
 
     let config = format!(
         "[cluster]\n\
          role = \"worker\"\n\
          master_ip = \"{master_ip}\"\n\
+         advertise_ip = \"{my_ip}\"\n\
          token = \"{token}\"\n\
-         node_name = \"{hostname}\"\n"
+         node_name = \"{hostname}\"\n\
+         \n\
+         [etcd]\n\
+         data_dir = \"{ETCD_DATA_DIR}\"\n\
+         listen_client_urls = \"{}\"\n\
+         advertise_client_urls = \"{}\"\n",
+        etcd_client_url(&my_ip),
+        etcd_client_url(&my_ip),
     );
 
-    std::fs::write(format!("{config_dir}/cluster.toml"), &config)
-        .context("failed to write cluster config")?;
+    std::fs::write(CLUSTER_CONFIG_PATH, &config).context("failed to write cluster config")?;
+
+    println!(
+        "{} Registering with etcd cluster via {}...",
+        "→".blue(),
+        master_ip
+    );
+    // etcd's own dynamic-membership workflow: ask an existing member to
+    // add us, which returns the full initial-cluster string (existing
+    // members + us) we need to bootstrap with --initial-cluster-state
+    // existing. Trying to guess that string ourselves instead of using
+    // what member add actually returns is exactly the kind of "should
+    // work" assumption that's bitten this project before (BORE/BBR
+    // Kconfig, PCI silently missing) — use the real output.
+    let initial_cluster = etcd_member_add(master_ip, &hostname, &my_ip)?;
+
+    println!("{} Bootstrapping local etcd member...", "→".blue());
+    let unit = etcd_unit_content(&hostname, &my_ip, &initial_cluster, "existing");
+    install_and_start_etcd(&unit)?;
 
     println!("{} Joined cluster at {}", "●".green(), master_ip.bold());
+    println!("  This node:  {} ({})", hostname.bold(), my_ip);
+    println!("  Members:    {initial_cluster}");
     Ok(())
 }
 
-fn cluster_leave() -> Result<()> {
-    let config_path = "/etc/monolith/cluster/cluster.toml";
-    if std::path::Path::new(config_path).exists() {
-        std::fs::remove_file(config_path).context("failed to remove cluster config")?;
+/// This node's own etcd member ID, in the hex form `member remove`
+/// expects — matched by name against our own hostname. `member list`
+/// prints IDs as decimal in JSON but hex everywhere else (verified
+/// against a real cluster: JSON's `"ID":13668033151171901709` is the
+/// exact same member as table view's `bdae9bbc11dd390d` —
+/// `format!("{:x}", id)` of the same number), so this converts rather
+/// than trying to scrape the hex out of table output.
+fn etcd_own_member_id(client_url: &str, hostname: &str) -> Result<String> {
+    let output = Command::new("etcdctl")
+        .args(["--endpoints", client_url, "member", "list", "-w", "json"])
+        .output()
+        .context("failed to run etcdctl member list")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "etcdctl member list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("failed to parse etcdctl JSON output")?;
+    let members = parsed["members"]
+        .as_array()
+        .context("unexpected etcdctl member list JSON shape")?;
+    for member in members {
+        if member["name"].as_str() == Some(hostname) {
+            let id = member["ID"]
+                .as_u64()
+                .context("member entry missing numeric ID")?;
+            return Ok(format!("{id:x}"));
+        }
+    }
+    anyhow::bail!("no etcd member named '{hostname}' found in the cluster")
+}
+
+/// This node's own `advertise_ip` as written to cluster.toml by
+/// `init`/`join` — NOT a fresh `detect_local_ip()` call. Those can
+/// legitimately disagree (e.g. `cluster init --advertise-ip <explicit>`
+/// picks something other than what auto-detection would find), and
+/// etcd was bootstrapped against whatever IP actually got written to
+/// the unit file, not whatever `detect_local_ip()` happens to return
+/// later. Found by actually running `cluster leave` end to end: it
+/// re-detected 192.168.8.8 when the cluster had been explicitly
+/// bootstrapped on 127.0.0.1, and only worked by accident because this
+/// etcd listens on 0.0.0.0.
+fn read_own_advertise_ip() -> Result<String> {
+    let content =
+        std::fs::read_to_string(CLUSTER_CONFIG_PATH).context("failed to read cluster config")?;
+    content
+        .lines()
+        .find(|l| l.starts_with("advertise_ip"))
+        .and_then(|l| l.split('"').nth(1))
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("cluster.toml has no advertise_ip"))
+}
+
+fn cluster_leave() -> Result<()> {
+    if !std::path::Path::new(CLUSTER_CONFIG_PATH).exists() {
+        println!("{}", "Not in a cluster.".yellow());
+        return Ok(());
+    }
+
+    let hostname = nix::unistd::gethostname()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "node".to_string());
+
+    // Best-effort: deregister from etcd before tearing down the local
+    // unit. If this fails (etcd already down, we're the last member,
+    // network partition) don't block leaving — a config file pointing
+    // at a cluster this node no longer participates in is worse than
+    // a stale etcd member entry an operator can clean up with
+    // `etcdctl member remove` by hand.
+    if let Ok(my_ip) = read_own_advertise_ip() {
+        let client_url = etcd_client_url(&my_ip);
+        match etcd_own_member_id(&client_url, &hostname) {
+            Ok(id) => {
+                let status = Command::new("etcdctl")
+                    .args(["--endpoints", &client_url, "member", "remove", &id])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        println!("{} Removed from etcd membership ({id})", "●".green())
+                    }
+                    _ => println!(
+                        "{} Couldn't remove etcd membership cleanly — you may need `etcdctl member remove {id}` on a remaining node",
+                        "⚠".yellow()
+                    ),
+                }
+            }
+            Err(e) => println!(
+                "{} Couldn't look up etcd membership before leaving: {e}",
+                "⚠".yellow()
+            ),
+        }
+    }
+
+    let _ = Command::new("systemctl")
+        .args(["disable", "--now", ETCD_UNIT_NAME])
+        .status();
+    let _ = std::fs::remove_file(ETCD_UNIT_PATH);
+    let _ = std::fs::remove_dir_all(ETCD_DATA_DIR);
+    let _ = Command::new("systemctl").arg("daemon-reload").status();
+
+    std::fs::remove_file(CLUSTER_CONFIG_PATH).context("failed to remove cluster config")?;
     println!("{} Left cluster", "●".green());
     Ok(())
 }
 
 fn cluster_nodes() -> Result<()> {
-    let config_path = "/etc/monolith/cluster/cluster.toml";
+    let config_path = CLUSTER_CONFIG_PATH;
     if !std::path::Path::new(config_path).exists() {
         println!(
             "{}",
@@ -361,16 +737,30 @@ fn cluster_nodes() -> Result<()> {
 }
 
 fn cluster_status() -> Result<()> {
-    let config_path = "/etc/monolith/cluster/cluster.toml";
-    if !std::path::Path::new(config_path).exists() {
+    if !std::path::Path::new(CLUSTER_CONFIG_PATH).exists() {
         println!("{}", "Not in a cluster.".yellow());
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(config_path).context("failed to read cluster config")?;
+    let content =
+        std::fs::read_to_string(CLUSTER_CONFIG_PATH).context("failed to read cluster config")?;
 
     println!("{}", "Cluster Status:".bold().underline());
     println!("{content}");
+
+    let (healthy, total, has_quorum) = quorum_health();
+    if total > 0 {
+        println!("{}", "Quorum:".bold().underline());
+        if has_quorum {
+            println!("  {} {healthy}/{total} etcd members healthy", "●".green());
+        } else {
+            println!(
+                "  {} QUORUM LOST — {healthy}/{total} etcd members healthy",
+                "●".red().bold()
+            );
+        }
+        println!("  (see `mnctl cluster quorum` for per-member detail)");
+    }
     Ok(())
 }
 
@@ -563,6 +953,25 @@ fn cluster_rolling_update(
         );
     }
 
+    // Refuse to start a rollout without a healthy Raft majority. A
+    // rolling update that restarts services chunk-by-chunk while the
+    // cluster can't even agree on its own membership is exactly the
+    // scenario that turns "one bad node" into "split-brain" — check
+    // before touching anything, not after something goes wrong.
+    let (healthy, total, has_quorum) = quorum_health();
+    if total > 0 && !has_quorum {
+        anyhow::bail!(
+            "refusing to start rolling update: quorum lost ({healthy}/{total} etcd members healthy). \
+             Fix the cluster first — see `mnctl cluster quorum`."
+        );
+    }
+    if total > 0 {
+        println!(
+            "{} Quorum OK ({healthy}/{total} members) — proceeding",
+            "●".green()
+        );
+    }
+
     println!(
         "{} Rolling update across {} node(s)",
         "→".blue().bold(),
@@ -675,7 +1084,7 @@ fn cluster_rolling_update(
 /// Read peer node addresses out of the config `cluster init` / `cluster
 /// join` already wrote — the same file `cluster_status` prints.
 fn read_peer_nodes() -> Vec<String> {
-    let config_path = "/etc/monolith/cluster/cluster.toml";
+    let config_path = CLUSTER_CONFIG_PATH;
     std::fs::read_to_string(config_path)
         .unwrap_or_default()
         .lines()
@@ -690,7 +1099,7 @@ fn read_peer_nodes() -> Vec<String> {
 /// written on one node shows up on the rest without a separate NFS/
 /// Samba export to hand-configure.
 fn cluster_fs_mount(at: &str) -> Result<()> {
-    let config_path = "/etc/monolith/cluster/cluster.toml";
+    let config_path = CLUSTER_CONFIG_PATH;
     if !std::path::Path::new(config_path).exists() {
         anyhow::bail!("not in a cluster — run `mnctl cluster init` or `mnctl cluster join` first");
     }
