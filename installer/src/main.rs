@@ -978,7 +978,14 @@ fn main() -> Result<()> {
 
     let mut app = InstallerApp::new();
 
-    // Detect disks
+    // Detect disks — filtering out loop/ram/zram/dm/fd/nbd/sr devices
+    // from the start. On the live ISO, archiso's squashfs root is
+    // mounted from /dev/loop0, so the very first row offered here was
+    // the live system's OWN loop device: sgdisk can't repartition it
+    // ("Unable to save backup partition table!", exactly the failure
+    // the critical-step rework was built to surface) and it must never
+    // be selectable as an install target. None of these names can be a
+    // real install disk anyway.
     if let Ok(output) = std::process::Command::new("lsblk")
         .args(["-d", "-n", "-o", "NAME,SIZE,MODEL"])
         .output()
@@ -986,6 +993,12 @@ fn main() -> Result<()> {
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         app.disk_list = stdout_str
             .lines()
+            .filter(|l| {
+                let name = l.split_whitespace().next().unwrap_or("");
+                !["loop", "ram", "zram", "fd", "dm-", "nbd", "sr"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+            })
             .filter(|l| !l.trim().is_empty())
             .map(|l| l.to_string())
             .collect();
@@ -1064,18 +1077,30 @@ fn main() -> Result<()> {
                         },
                         Step::DiskSelection => match key.code {
                             KeyCode::Enter => {
-                                // The step already tracked which row
-                                // was highlighted but never wrote it
-                                // back into app.disk, so Enter always
-                                // fell through to spawn_installer's own
-                                // "empty disk -> /dev/sda" default no
-                                // matter what was selected on screen.
-                                if let Some(i) = app.disk_list_state.selected() {
-                                    if let Some(d) = app.disk_list.get(i) {
-                                        app.disk = d.clone();
+                                // Don't advance past an empty disk list —
+                                // with no real disks (the filtered-out
+                                // loop devices were the only entries),
+                                // proceeding would fall back to a
+                                // /dev/sda that doesn't exist.
+                                // Don't advance past an empty disk list —
+                                // with no real disks (the filtered-out
+                                // loop devices were the only entries),
+                                // proceeding would fall back to a
+                                // /dev/sda that doesn't exist.
+                                if !app.disk_list.is_empty() {
+                                    // The step already tracked which row
+                                    // was highlighted but never wrote it
+                                    // back into app.disk, so Enter always
+                                    // fell through to spawn_installer's own
+                                    // "empty disk -> /dev/sda" default no
+                                    // matter what was selected on screen.
+                                    if let Some(i) = app.disk_list_state.selected() {
+                                        if let Some(d) = app.disk_list.get(i) {
+                                            app.disk = d.clone();
+                                        }
                                     }
+                                    app.next_step();
                                 }
-                                app.next_step();
                             }
                             KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
                             KeyCode::Down => {
@@ -1318,6 +1343,22 @@ fn render_keyboard(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
 }
 
 fn render_disk_selection(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
+    if app.disk_list.is_empty() {
+        let widget = Paragraph::new(
+            "  No suitable disks found.\n\n  \
+             The live medium's loop devices are never valid install targets\n  \
+             and have been excluded. Attach a real disk to this machine\n  \
+             and restart the installer.\n\n  \
+             Press q to quit.",
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Installation Disk "),
+        );
+        f.render_widget(widget, area);
+        return;
+    }
     let items: Vec<ListItem> = app
         .disk_list
         .iter()
