@@ -33,8 +33,50 @@ rescoped and what was dropped and why.
   Hetzner/DigitalOcean/AWS (generates files only, no credentials, no
   API calls)
 - `mnctl doctor` — rule-based diagnostics against known footguns
+- ISO boot self-test (`monolith-selftest.service`) — runs only when the
+  kernel cmdline carries `monolith.selftest` (inert on a real user's
+  boot), verifies os-release, shipped binaries, and that
+  `monolith-installer --help` works, then reports PASS/FAIL to the
+  serial console so CI can boot the image under QEMU and grep the
+  result. Catches exactly the bugs that have shipped before (stale
+  version banner, `monolith-installer: command not found`) without
+  needing a human to boot the ISO in a VM.
 
 ### Fixed
+
+- `monolith-installer` treated *every* failed step as "log a warning
+  and keep going" — a completely failed install (wrong disk, disk in
+  use, pacstrap unable to reach a mirror) still ran every remaining
+  step against nothing and finished on a fraudulent "Installation
+  complete!" screen. Critical steps (partitioning, formatting,
+  mounting, pacstrap, fstab, bootloader) now abort the install with a
+  visible error instead.
+- `monolith-installer` created `@`/`@home`/`@snapshots`/`@log`/`@cache`
+  subvolumes but never actually mounted them — pacstrap installed
+  straight into the top-level volume and the snapshot-friendly layout
+  was decorative. The installer now remounts through `subvol=@` and
+  mounts the rest at their real paths.
+- `monolith-installer` never wrote `/etc/fstab` (genfstab's stdout, the
+  actual fstab, was thrown away), never mounted the ESP at `/mnt/boot`,
+  and never wrote a systemd-boot loader entry — on their own, each is
+  enough to explain "doesn't even boot". All three are now done, with
+  `root=UUID=...` handling and the LUKS `encrypt` mkinitcpio hook for
+  encrypted installs.
+- `monolith-installer` `--help` was silently ignored and crashed with
+  a bare "No such device or address" outside a real TTY. It now prints
+  help/version; the TUI still needs a real terminal and says so.
+- `monolith-installer` Keyboard/Timezone/Network/UserCreation/Packages
+  steps had no key handling at all — layout/timezone/packages could
+  never be changed and hostname/username could never be typed.
+  DiskSelection also never wrote the selected row back, so Enter always
+  fell through to the `/dev/sda` default. All steps are now wired up.
+- `monolith-installer` ran pacstrap/pacman through a buffered helper,
+  so the TUI sat frozen on one percentage for the whole download.
+  Package installation now streams real progress into the log.
+- `mkarchiso`'s airootfs copy doesn't preserve custom file permissions
+  — scripts landed as non-executable `644` in built images (the exact
+  `monolith-installer: command not found` bug). `profiledef.sh` now
+  chowns/chmods `/usr/local/bin/` recursively instead of per-file.
 
 - `mnctl cluster rolling-update` read a cluster config path
   (`/etc/monolith/cluster.toml`) that `cluster init`/`join` never

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Monolith OS — boot self-test.
+#
+# Exists because two real, user-facing bugs (stale "1.3.0 (Slate)"
+# version banner, `monolith-installer: command not found`) shipped in
+# a built ISO and were only caught by a human booting it in a VM.
+# Nothing in CI actually booted the image it produced. This script is
+# that check, automated: it runs on boot ONLY when the kernel cmdline
+# carries `monolith.selftest` (see the unit's ConditionKernelCommandLine
+# — completely inert on a real user's boot), verifies the handful of
+# things that have actually broken before, and reports PASS/FAIL over
+# the serial console so a CI job launching this under QEMU with
+# `-serial file:...` can grep the result without needing to drive an
+# interactive login.
+set -uo pipefail
+
+# Every check below writes here directly rather than relying on
+# systemd's StandardOutput=journal+console routing, which depends on
+# a console being attached in a way that isn't guaranteed this early
+# in a live-boot service ordering.
+CONSOLE=/dev/ttyS0
+if [[ ! -w "${CONSOLE}" ]]; then
+    CONSOLE=/dev/console
+fi
+
+log() { echo "$*" > "${CONSOLE}"; }
+
+FAILURES=()
+
+check() {
+    local desc="$1"
+    shift
+    if "$@" > /tmp/monolith-selftest-check.log 2>&1; then
+        log "  PASS: ${desc}"
+    else
+        log "  FAIL: ${desc} — $(tail -c 300 /tmp/monolith-selftest-check.log | tr '\n' ' ')"
+        FAILURES+=("${desc}")
+    fi
+}
+
+log "MONOLITH_SELFTEST_START"
+
+# 1. os-release should report a real version, not a stale one. Doesn't
+# hardcode an expected string here (that would need updating every
+# release) — just checks the fields are present and non-empty, which
+# is enough to catch "the whole PRETTY_NAME line got dropped" but the
+# real version-match check happens on the CI side, which knows what
+# version it just built and can compare exactly.
+check "os-release has VERSION_ID" bash -c '. /etc/os-release && [[ -n "${VERSION_ID:-}" ]]'
+if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    log "  INFO: VERSION_ID=${VERSION_ID:-unset} PRETTY_NAME=${PRETTY_NAME:-unset}"
+fi
+
+# 2. monolith-installer must exist, be executable, and actually run
+# without crashing — not just "a file is present at that path". A
+# placeholder/non-executable file (the exact bug this caught before)
+# fails this the same way a missing binary would.
+check "monolith-installer is executable" test -x /usr/local/bin/monolith-installer
+check "monolith-installer --help runs" /usr/local/bin/monolith-installer --help
+
+# 3. Same for the other shipped binaries.
+check "mnctl --version runs" mnctl --version
+check "mnpkg --version runs" mnpkg --version
+
+if [[ ${#FAILURES[@]} -eq 0 ]]; then
+    log "MONOLITH_SELFTEST_RESULT=PASS"
+else
+    log "MONOLITH_SELFTEST_RESULT=FAIL (${#FAILURES[@]} check(s) failed: ${FAILURES[*]})"
+fi
+log "MONOLITH_SELFTEST_END"
+
+# Give the serial console a moment to flush before the VM disappears.
+sync
+sleep 1
+systemctl poweroff

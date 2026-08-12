@@ -1,7 +1,8 @@
-use std::io;
+use std::io::{self, BufRead, BufReader};
+use std::process::Stdio;
 use std::sync::mpsc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -11,6 +12,36 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+
+/// Preset keyboard layouts offered on the Keyboard step. Not exhaustive
+/// (localectl knows hundreds) — covers the common cases with an actual
+/// selectable list rather than a text hint nobody could act on.
+const KEYBOARD_LAYOUTS: &[&str] = &[
+    "us", "uk", "de", "fr", "es", "it", "pt", "nl", "se", "no", "dk", "fi", "pl", "cz", "gr", "ru",
+    "ua", "tr", "jp", "br",
+];
+
+/// Preset timezones offered on the Timezone step, same rationale as
+/// KEYBOARD_LAYOUTS above.
+const TIMEZONES: &[&str] = &[
+    "UTC",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Sao_Paulo",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Madrid",
+    "Europe/Moscow",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Shanghai",
+    "Asia/Tokyo",
+    "Australia/Sydney",
+    "Africa/Cairo",
+];
 
 const MONOLITH_LOGO: &str = r#"
 ,ggg, ,ggg,_,ggg,                                                                                 _,gggggg,_
@@ -72,14 +103,25 @@ struct InstallerApp {
     keyboard_layout: String,
     disk_list: Vec<String>,
     disk_list_state: ListState,
+    keyboard_list_state: ListState,
+    timezone_list_state: ListState,
+    package_list_state: ListState,
     should_quit: bool,
     install_progress: u16,
     install_log: Vec<String>,
     install_started: bool,
+    install_failed: bool,
 }
 
 impl InstallerApp {
     fn new() -> Self {
+        let mut keyboard_list_state = ListState::default();
+        keyboard_list_state.select(Some(0));
+        let mut timezone_list_state = ListState::default();
+        timezone_list_state.select(Some(0));
+        let mut package_list_state = ListState::default();
+        package_list_state.select(Some(0));
+
         Self {
             step: Step::Welcome,
             hostname: String::new(),
@@ -99,10 +141,14 @@ impl InstallerApp {
             keyboard_layout: "us".to_string(),
             disk_list: vec![],
             disk_list_state: ListState::default(),
+            keyboard_list_state,
+            timezone_list_state,
+            package_list_state,
             should_quit: false,
             install_progress: 0,
             install_log: Vec::new(),
             install_started: false,
+            install_failed: false,
         }
     }
 
@@ -189,6 +235,149 @@ fn run_install_step(
     }
 }
 
+/// Like `run_install_step`, but for steps where failure genuinely means
+/// nothing after it can be trusted — partitioning, formatting, mounting,
+/// pacstrap. The plain helper deliberately treats every failure as
+/// "log a warning and keep going" (right for soft steps, e.g. an
+/// optional package failing to install), but the same leniency applied
+/// here meant a completely failed install — wrong disk, disk in use,
+/// pacstrap unable to reach a mirror — still crawled all the way to a
+/// fraudulent "Installation complete!" screen instead of stopping.
+/// Returns false on failure so the caller can abort.
+fn run_critical_step(
+    tx: &mpsc::Sender<InstallMsg>,
+    progress: u16,
+    desc: &str,
+    cmd: &str,
+    args: &[&str],
+) -> bool {
+    let _ = tx.send(InstallMsg::Log(desc.to_string()));
+    let _ = tx.send(InstallMsg::Progress(progress));
+    match std::process::Command::new(cmd).args(args).output() {
+        Ok(o) if o.status.success() => {
+            let _ = tx.send(InstallMsg::Log(format!("  [ok] {desc}")));
+            true
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let _ = tx.send(InstallMsg::Log(format!("  [err] {desc}: {stderr}")));
+            false
+        }
+        Err(e) => {
+            let _ = tx.send(InstallMsg::Log(format!("  [err] {desc}: {e}")));
+            false
+        }
+    }
+}
+
+/// Like `run_install_step`, but streams the child's stdout/stderr into
+/// the install log line-by-line as it runs instead of buffering
+/// everything until the process exits, and returns whether it actually
+/// succeeded (like `run_critical_step`) rather than always reporting
+/// true — callers that can't tolerate this step failing (pacstrap)
+/// check the result and abort; callers installing an optional package
+/// group can ignore it and keep going, same as before.
+///
+/// Exists because `pacstrap`/`pacman -S` were run through the buffered
+/// helper above, so the TUI held one static percentage on screen for
+/// however long the whole download took — anywhere from seconds to
+/// several minutes depending on mirror speed — with zero visible
+/// feedback in between. Reported as "downloads terribly": not that the
+/// download itself was slower, but that a live install and a hung one
+/// looked identical. pacman's own progress bars use carriage returns,
+/// which line-based reading can't reproduce faithfully, but forwarding
+/// each newline-terminated chunk (which pacman does emit between
+/// packages/files) is enough to turn "frozen screen" into "visibly
+/// making progress".
+fn run_install_step_streaming(
+    tx: &mpsc::Sender<InstallMsg>,
+    progress: u16,
+    desc: &str,
+    cmd: &str,
+    args: &[&str],
+) -> bool {
+    let _ = tx.send(InstallMsg::Log(desc.to_string()));
+    let _ = tx.send(InstallMsg::Progress(progress));
+
+    let mut child = match std::process::Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(InstallMsg::Log(format!("  [err] {desc}: {e}")));
+            return false;
+        }
+    };
+
+    let stdout_handle = child.stdout.take().map(|s| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(s).lines().map_while(std::result::Result::ok) {
+                let line = line.trim();
+                if !line.is_empty() {
+                    let _ = tx.send(InstallMsg::Log(format!("  {line}")));
+                }
+            }
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|s| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(s).lines().map_while(std::result::Result::ok) {
+                let line = line.trim();
+                if !line.is_empty() {
+                    let _ = tx.send(InstallMsg::Log(format!("  {line}")));
+                }
+            }
+        })
+    });
+    if let Some(h) = stdout_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = stderr_handle {
+        let _ = h.join();
+    }
+
+    match child.wait() {
+        Ok(status) if status.success() => {
+            let _ = tx.send(InstallMsg::Log(format!("  [ok] {desc}")));
+            true
+        }
+        Ok(status) => {
+            let _ = tx.send(InstallMsg::Log(format!(
+                "  [err] {desc}: exited with {status}"
+            )));
+            false
+        }
+        Err(e) => {
+            let _ = tx.send(InstallMsg::Log(format!("  [err] {desc}: {e}")));
+            false
+        }
+    }
+}
+
+/// Resolves a block device's filesystem/partition UUID via `blkid`, for
+/// writing stable `root=UUID=...` boot-loader entries instead of a raw
+/// device path that can shift on the next boot.
+fn blkid_uuid(dev: &str) -> Option<String> {
+    let out = std::process::Command::new("blkid")
+        .args(["-s", "UUID", "-o", "value", dev])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 struct InstallConfig {
     disk: String,
     hostname: String,
@@ -222,63 +411,116 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         let keyboard_layout = &cfg.keyboard_layout;
         let packages = &cfg.packages;
 
+        // Aborts the install immediately on a failed critical step
+        // instead of letting the rest of spawn_installer march on top
+        // of a disk that was never actually partitioned/formatted/
+        // mounted. InstallMsg::Error existed before this fix but was
+        // never sent from anywhere — a totally failed install (wrong
+        // disk, disk in use, no network for pacstrap) still ran every
+        // remaining step against nothing and finished on a fraudulent
+        // "Installation complete!" screen.
+        macro_rules! critical {
+            ($result:expr, $msg:expr) => {
+                if !$result {
+                    let _ = tx.send(InstallMsg::Error($msg.to_string()));
+                    return;
+                }
+            };
+        }
+
         // Step 1: Partition disk
-        run_install_step(
-            &tx,
-            5,
-            &format!("Partitioning {target_disk}..."),
-            "sgdisk",
-            &[
-                "-Z",
-                "-n",
-                "1:0:+512M",
-                "-t",
-                "1:ef00",
-                "-n",
-                "2:0:0",
-                "-t",
-                "2:8300",
-                &target_disk,
-            ],
+        critical!(
+            run_critical_step(
+                &tx,
+                5,
+                &format!("Partitioning {target_disk}..."),
+                "sgdisk",
+                &[
+                    "-Z",
+                    "-n",
+                    "1:0:+512M",
+                    "-t",
+                    "1:ef00",
+                    "-n",
+                    "2:0:0",
+                    "-t",
+                    "2:8300",
+                    &target_disk,
+                ],
+            ),
+            format!("Partitioning {target_disk} failed — it may not exist or may be in use.")
         );
 
-        // Step 2: Format partitions
+        // Step 1b: Make sure the kernel actually picked up the new
+        // partition table (and created the /dev/sdaN device nodes)
+        // before the very next command tries to format one of them.
+        // sgdisk usually triggers this itself, but not reliably enough
+        // across every environment to bet the rest of the install on
+        // it — a race here means mkfs targets a device node that
+        // doesn't exist yet.
         run_install_step(
             &tx,
-            15,
-            "Formatting EFI partition...",
-            "mkfs.fat",
-            &["-F32", &format!("{target_disk}1")],
+            12,
+            "Reloading partition table...",
+            "partprobe",
+            &[&target_disk],
+        );
+        let _ = std::process::Command::new("udevadm")
+            .args(["settle"])
+            .output();
+
+        // Step 2: Format partitions
+        critical!(
+            run_critical_step(
+                &tx,
+                15,
+                "Formatting EFI partition...",
+                "mkfs.fat",
+                &["-F32", &format!("{target_disk}1")],
+            ),
+            "Formatting the EFI partition failed."
         );
         if use_encryption {
-            run_install_step(
-                &tx,
-                18,
-                "Setting up LUKS encryption...",
-                "cryptsetup",
-                &["luksFormat", "--batch-mode", &format!("{target_disk}2")],
+            critical!(
+                run_critical_step(
+                    &tx,
+                    18,
+                    "Setting up LUKS encryption...",
+                    "cryptsetup",
+                    &["luksFormat", "--batch-mode", &format!("{target_disk}2")],
+                ),
+                "Setting up LUKS encryption failed."
             );
-            run_install_step(
-                &tx,
-                20,
-                "Opening encrypted volume...",
-                "cryptsetup",
-                &["open", &format!("{target_disk}2"), "cryptroot"],
+            critical!(
+                run_critical_step(
+                    &tx,
+                    20,
+                    "Opening encrypted volume...",
+                    "cryptsetup",
+                    &["open", &format!("{target_disk}2"), "cryptroot"],
+                ),
+                "Opening the encrypted volume failed."
             );
-            run_install_step(
-                &tx,
-                22,
-                "Formatting root (btrfs)...",
-                "mkfs.btrfs",
-                &["-f", "/dev/mapper/cryptroot"],
+            critical!(
+                run_critical_step(
+                    &tx,
+                    22,
+                    "Formatting root (btrfs)...",
+                    "mkfs.btrfs",
+                    &["-f", "/dev/mapper/cryptroot"],
+                ),
+                "Formatting the root filesystem failed."
             );
         } else {
-            run_install_step(
-                &tx,
-                20,
-                "Formatting root (btrfs)...",
-                "mkfs.btrfs",
-                &["-f", &format!("{target_disk}2")],
+            critical!(
+                run_critical_step(
+                    &tx,
+                    20,
+                    "Formatting root (btrfs)...",
+                    "mkfs.btrfs",
+                    &["-f", &format!("{target_disk}2")],
+                ),
+                "Formatting the root filesystem failed."
             );
         }
 
@@ -288,38 +530,204 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         } else {
             format!("{target_disk}2")
         };
-        run_install_step(&tx, 25, "Mounting root...", "mount", &[&root_dev, "/mnt"]);
+        critical!(
+            run_critical_step(
+                &tx,
+                25,
+                "Mounting root (top-level)...",
+                "mount",
+                &[&root_dev, "/mnt"]
+            ),
+            "Mounting the root filesystem failed."
+        );
         for subvol in &["@", "@home", "@snapshots", "@log", "@cache"] {
             run_install_step(
                 &tx,
-                28,
+                27,
                 &format!("Creating subvolume {subvol}..."),
                 "btrfs",
                 &["subvolume", "create", &format!("/mnt/{subvol}")],
             );
         }
-
-        // Step 4: Install base system
+        // The subvolumes above were created under the *top-level*
+        // volume, which is not what should actually end up mounted as
+        // root. Without this remount, pacstrap installs straight into
+        // the top-level volume and @/@home/@snapshots/@log/@cache just
+        // sit there empty and unused forever — the whole
+        // snapshot-friendly layout was decorative, never actually
+        // mounted anywhere. Remount through subvol=@ (and mount the
+        // rest at their real paths) so everything from here on lands
+        // in the intended subvolume.
         run_install_step(
             &tx,
-            35,
-            "Installing base system (pacstrap)...",
-            "pacstrap",
+            28,
+            "Unmounting top-level volume...",
+            "umount",
+            &["/mnt"],
+        );
+        critical!(
+            run_critical_step(
+                &tx,
+                29,
+                "Mounting @ subvolume as root...",
+                "mount",
+                &["-o", "subvol=@,compress=zstd", &root_dev, "/mnt"]
+            ),
+            "Mounting the @ subvolume as root failed."
+        );
+        let _ = std::fs::create_dir_all("/mnt/home");
+        let _ = std::fs::create_dir_all("/mnt/.snapshots");
+        let _ = std::fs::create_dir_all("/mnt/var/log");
+        let _ = std::fs::create_dir_all("/mnt/var/cache");
+        let _ = std::fs::create_dir_all("/mnt/boot");
+        run_install_step(
+            &tx,
+            30,
+            "Mounting @home subvolume...",
+            "mount",
+            &["-o", "subvol=@home,compress=zstd", &root_dev, "/mnt/home"],
+        );
+        run_install_step(
+            &tx,
+            30,
+            "Mounting @snapshots subvolume...",
+            "mount",
             &[
-                "/mnt",
-                "base",
-                "linux",
-                "linux-firmware",
-                "btrfs-progs",
-                "networkmanager",
-                "sudo",
-                "openssh",
-                "nftables",
+                "-o",
+                "subvol=@snapshots,compress=zstd",
+                &root_dev,
+                "/mnt/.snapshots",
             ],
         );
+        run_install_step(
+            &tx,
+            31,
+            "Mounting @log subvolume...",
+            "mount",
+            &["-o", "subvol=@log,compress=zstd", &root_dev, "/mnt/var/log"],
+        );
+        run_install_step(
+            &tx,
+            31,
+            "Mounting @cache subvolume...",
+            "mount",
+            &[
+                "-o",
+                "subvol=@cache,compress=zstd",
+                &root_dev,
+                "/mnt/var/cache",
+            ],
+        );
+        // Mount the real EFI System Partition at /mnt/boot. Without
+        // this, `bootctl install` later writes the systemd-boot EFI
+        // binary into an ordinary directory inside the btrfs root
+        // instead of onto the actual ESP, so the firmware finds
+        // nothing bootable there at all. This was, on its own, enough
+        // to explain "doesn't even boot" regardless of fstab.
+        critical!(
+            run_critical_step(
+                &tx,
+                32,
+                "Mounting EFI system partition...",
+                "mount",
+                &[&format!("{target_disk}1"), "/mnt/boot"]
+            ),
+            "Mounting the EFI system partition failed."
+        );
 
-        // Step 5: Generate fstab
-        run_install_step(&tx, 55, "Generating fstab...", "genfstab", &["-U", "/mnt"]);
+        // Step 4: Install base system. Streamed (not the buffered
+        // helper) so the TUI shows real package/download progress
+        // instead of sitting frozen on one percentage for the whole
+        // pacstrap run.
+        critical!(
+            run_install_step_streaming(
+                &tx,
+                35,
+                "Installing base system (pacstrap)...",
+                "pacstrap",
+                &[
+                    "/mnt",
+                    "base",
+                    "linux",
+                    "linux-firmware",
+                    "btrfs-progs",
+                    "networkmanager",
+                    "sudo",
+                    "openssh",
+                    "nftables",
+                ],
+            ),
+            "Installing the base system (pacstrap) failed — check network connectivity and mirror availability."
+        );
+
+        // Step 4b: LUKS needs the `encrypt` mkinitcpio hook to unlock
+        // the root device at boot — it is NOT in Arch's default HOOKS
+        // array, and pacstrap already generated one initramfs using
+        // that default while installing the `linux` package. Without
+        // this, an encrypted install partitions/formats/installs fine
+        // and then can never actually decrypt its own root at boot.
+        if use_encryption {
+            let _ = tx.send(InstallMsg::Log(
+                "Enabling LUKS unlock in initramfs...".to_string(),
+            ));
+            if let Ok(conf) = std::fs::read_to_string("/mnt/etc/mkinitcpio.conf") {
+                if !conf.contains("encrypt") {
+                    let updated =
+                        conf.replacen("block filesystems", "block encrypt filesystems", 1);
+                    let _ = std::fs::write("/mnt/etc/mkinitcpio.conf", updated);
+                }
+            }
+            run_install_step(
+                &tx,
+                33,
+                "Regenerating initramfs with encryption support...",
+                "arch-chroot",
+                &["/mnt", "mkinitcpio", "-P"],
+            );
+        }
+
+        // Step 5: Generate fstab. Must go through Command directly
+        // (not run_install_step, which only logs [ok]/[warn] and
+        // throws the actual command output away) because genfstab's
+        // stdout *is* the fstab — without writing it to
+        // /mnt/etc/fstab, the installed system has no record of which
+        // partitions/subvolumes to mount, so nothing (root included)
+        // mounts at boot. This was the most direct cause of "doesn't
+        // even boot".
+        let _ = tx.send(InstallMsg::Log("Generating fstab...".to_string()));
+        let _ = tx.send(InstallMsg::Progress(55));
+        let fstab_ok = match std::process::Command::new("genfstab")
+            .args(["-U", "/mnt"])
+            .output()
+        {
+            Ok(o) if o.status.success() => match std::fs::write("/mnt/etc/fstab", &o.stdout) {
+                Ok(()) => {
+                    let _ = tx.send(InstallMsg::Log("  [ok] Generating fstab...".to_string()));
+                    true
+                }
+                Err(e) => {
+                    let _ = tx.send(InstallMsg::Log(format!(
+                        "  [err] writing /mnt/etc/fstab: {e}"
+                    )));
+                    false
+                }
+            },
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let _ = tx.send(InstallMsg::Log(format!(
+                    "  [err] genfstab failed: {stderr}"
+                )));
+                false
+            }
+            Err(e) => {
+                let _ = tx.send(InstallMsg::Log(format!("  [err] genfstab: {e}")));
+                false
+            }
+        };
+        critical!(
+            fstab_ok,
+            "Generating /etc/fstab failed — the installed system would have no record of what to mount at boot."
+        );
 
         // Step 6: Set timezone
         run_install_step(
@@ -400,13 +808,58 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
         );
 
         // Step 10: Install bootloader
-        run_install_step(
-            &tx,
-            78,
-            "Installing bootloader (systemd-boot)...",
-            "arch-chroot",
-            &["/mnt", "bootctl", "install"],
+        critical!(
+            run_critical_step(
+                &tx,
+                78,
+                "Installing bootloader (systemd-boot)...",
+                "arch-chroot",
+                &["/mnt", "bootctl", "install"],
+            ),
+            "Installing the systemd-boot bootloader failed."
         );
+
+        // Step 10b: Write an actual loader entry. `bootctl install`
+        // only puts the systemd-boot EFI binary on the ESP — it does
+        // not create anything pointing at a kernel/initramfs, and
+        // unlike GRUB there's no os-prober-style auto-detection to
+        // fall back on. Without this file the firmware boots straight
+        // into an empty systemd-boot menu with nothing to select,
+        // independently of whether fstab/mounts are correct. This was
+        // the other direct cause of "doesn't even boot".
+        let options = if use_encryption {
+            match blkid_uuid(&format!("{target_disk}2")) {
+                Some(luks_uuid) => format!(
+                    "cryptdevice=UUID={luks_uuid}:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw"
+                ),
+                None => "root=/dev/mapper/cryptroot rootflags=subvol=@ rw".to_string(),
+            }
+        } else {
+            match blkid_uuid(&root_dev) {
+                Some(uuid) => format!("root=UUID={uuid} rootflags=subvol=@ rw"),
+                None => format!("root={root_dev} rootflags=subvol=@ rw"),
+            }
+        };
+        let entry = format!(
+            "title   Monolith OS\nlinux   /vmlinuz-linux\ninitrd  /initramfs-linux.img\noptions {options}\n"
+        );
+        let _ = std::fs::create_dir_all("/mnt/boot/loader/entries");
+        let _ = std::fs::write(
+            "/mnt/boot/loader/loader.conf",
+            "default monolith.conf\ntimeout 3\nconsole-mode max\neditor no\n",
+        );
+        match std::fs::write("/mnt/boot/loader/entries/monolith.conf", entry) {
+            Ok(()) => {
+                let _ = tx.send(InstallMsg::Log(
+                    "  [ok] Writing boot loader entry...".to_string(),
+                ));
+            }
+            Err(e) => {
+                let _ = tx.send(InstallMsg::Log(format!(
+                    "  [err] writing boot loader entry: {e}"
+                )));
+            }
+        }
 
         // Step 11: Security hardening
         run_install_step(
@@ -448,7 +901,7 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
                 if !pkgs.is_empty() {
                     let mut args = vec!["-S", "--noconfirm", "--needed"];
                     args.extend(pkgs.iter());
-                    run_install_step(
+                    run_install_step_streaming(
                         &tx,
                         92,
                         &format!("Installing {pkg_name}..."),
@@ -487,7 +940,37 @@ fn spawn_installer(tx: mpsc::Sender<InstallMsg>, cfg: InstallConfig) {
 }
 
 fn main() -> Result<()> {
-    enable_raw_mode()?;
+    // This is a TUI app with no other argument parsing at all — before
+    // this fix, ANY argument (including `--help`) was silently ignored
+    // and fell straight into enable_raw_mode() below, which needs a
+    // real TTY and fails with a bare "No such device or address (os
+    // error 6)" when there isn't one. Caught by the ISO boot self-test
+    // running `monolith-installer --help` non-interactively — exactly
+    // the class of bug that check exists to catch, just one layer
+    // deeper than "does the binary exist and run at all". A CLI tool
+    // silently ignoring --help instead of printing help is a real gap
+    // on its own, independent of the crash.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("monolith-installer {}", env!("CARGO_PKG_VERSION"));
+        println!("Monolith OS TUI installer — partitions, installs the base");
+        println!("system, and configures the bootloader. Run with no arguments");
+        println!("from a real terminal.");
+        println!();
+        println!("Usage: monolith-installer");
+        println!();
+        println!("Options:");
+        println!("  -h, --help     Print this message");
+        println!("  -V, --version  Print version");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("monolith-installer {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    enable_raw_mode()
+        .context("failed to enter raw terminal mode — monolith-installer needs a real interactive terminal, not a pipe/redirect/non-interactive session")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -524,6 +1007,7 @@ fn main() -> Result<()> {
                 }
                 InstallMsg::Error(e) => {
                     app.install_log.push(format!("[ERROR] {e}"));
+                    app.install_failed = true;
                 }
             }
         }
@@ -531,50 +1015,195 @@ fn main() -> Result<()> {
         if event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') if app.step != Step::Installing => {
-                            app.should_quit = true;
-                        }
-                        KeyCode::Enter => {
-                            if app.step == Step::Review {
-                                // Start real installation
-                                app.next_step();
-                                if !app.install_started {
-                                    app.install_started = true;
-                                    spawn_installer(
-                                        tx.clone(),
-                                        InstallConfig {
-                                            disk: app.disk.clone(),
-                                            hostname: app.hostname.clone(),
-                                            username: app.username.clone(),
-                                            timezone: app.timezone.clone(),
-                                            use_encryption: app.use_encryption,
-                                            keyboard_layout: app.keyboard_layout.clone(),
-                                            packages: app.packages.clone(),
-                                        },
-                                    );
+                    // Dispatched per-step rather than as one flat match
+                    // on the keycode. Before this, only DiskSelection
+                    // and Encryption had any handling at all —
+                    // Keyboard/Timezone/Network/UserCreation/Packages
+                    // had none, so hostname/username could never be
+                    // typed and layout/timezone/packages could never
+                    // be changed. Keying off app.step first makes it
+                    // structurally obvious which steps are still dead,
+                    // instead of that being an easy-to-miss omission
+                    // buried in a single giant match.
+                    match app.step {
+                        Step::Keyboard => match key.code {
+                            KeyCode::Enter => app.next_step(),
+                            KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
+                            KeyCode::Down => {
+                                let i = app.keyboard_list_state.selected().unwrap_or(0);
+                                let next = (i + 1).min(KEYBOARD_LAYOUTS.len() - 1);
+                                app.keyboard_list_state.select(Some(next));
+                                app.keyboard_layout = KEYBOARD_LAYOUTS[next].to_string();
+                            }
+                            KeyCode::Up => {
+                                let i = app.keyboard_list_state.selected().unwrap_or(0);
+                                let next = i.saturating_sub(1);
+                                app.keyboard_list_state.select(Some(next));
+                                app.keyboard_layout = KEYBOARD_LAYOUTS[next].to_string();
+                            }
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
+                        Step::Timezone => match key.code {
+                            KeyCode::Enter => app.next_step(),
+                            KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
+                            KeyCode::Down => {
+                                let i = app.timezone_list_state.selected().unwrap_or(0);
+                                let next = (i + 1).min(TIMEZONES.len() - 1);
+                                app.timezone_list_state.select(Some(next));
+                                app.timezone = TIMEZONES[next].to_string();
+                            }
+                            KeyCode::Up => {
+                                let i = app.timezone_list_state.selected().unwrap_or(0);
+                                let next = i.saturating_sub(1);
+                                app.timezone_list_state.select(Some(next));
+                                app.timezone = TIMEZONES[next].to_string();
+                            }
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
+                        Step::DiskSelection => match key.code {
+                            KeyCode::Enter => {
+                                // The step already tracked which row
+                                // was highlighted but never wrote it
+                                // back into app.disk, so Enter always
+                                // fell through to spawn_installer's own
+                                // "empty disk -> /dev/sda" default no
+                                // matter what was selected on screen.
+                                if let Some(i) = app.disk_list_state.selected() {
+                                    if let Some(d) = app.disk_list.get(i) {
+                                        app.disk = d.clone();
+                                    }
                                 }
-                            } else {
                                 app.next_step();
                             }
-                        }
-                        KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
-                        KeyCode::Down if app.step == Step::DiskSelection => {
-                            let i = app.disk_list_state.selected().unwrap_or(0);
-                            if i < app.disk_list.len().saturating_sub(1) {
-                                app.disk_list_state.select(Some(i + 1));
+                            KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
+                            KeyCode::Down => {
+                                let i = app.disk_list_state.selected().unwrap_or(0);
+                                if i < app.disk_list.len().saturating_sub(1) {
+                                    app.disk_list_state.select(Some(i + 1));
+                                }
+                            }
+                            KeyCode::Up => {
+                                let i = app.disk_list_state.selected().unwrap_or(0);
+                                if i > 0 {
+                                    app.disk_list_state.select(Some(i - 1));
+                                }
+                            }
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
+                        Step::Encryption => match key.code {
+                            KeyCode::Enter => app.next_step(),
+                            KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
+                            KeyCode::Char(' ') => app.use_encryption = !app.use_encryption,
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
+                        Step::Network => match key.code {
+                            KeyCode::Enter => app.next_step(),
+                            KeyCode::Esc => app.prev_step(),
+                            KeyCode::Backspace => {
+                                app.hostname.pop();
+                            }
+                            KeyCode::Char(c)
+                                if (c.is_ascii_alphanumeric() || c == '-')
+                                    && app.hostname.len() < 63 =>
+                            {
+                                app.hostname.push(c.to_ascii_lowercase());
+                            }
+                            _ => {}
+                        },
+                        Step::UserCreation => match key.code {
+                            KeyCode::Enter => app.next_step(),
+                            KeyCode::Esc => app.prev_step(),
+                            KeyCode::Backspace => {
+                                app.username.pop();
+                            }
+                            KeyCode::Char(c)
+                                if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                                    && app.username.len() < 32 =>
+                            {
+                                app.username.push(c.to_ascii_lowercase());
+                            }
+                            _ => {}
+                        },
+                        Step::Packages => match key.code {
+                            KeyCode::Enter => app.next_step(),
+                            KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
+                            KeyCode::Down => {
+                                let i = app.package_list_state.selected().unwrap_or(0);
+                                if i < app.packages.len().saturating_sub(1) {
+                                    app.package_list_state.select(Some(i + 1));
+                                }
+                            }
+                            KeyCode::Up => {
+                                let i = app.package_list_state.selected().unwrap_or(0);
+                                if i > 0 {
+                                    app.package_list_state.select(Some(i - 1));
+                                }
+                            }
+                            KeyCode::Char(' ') => {
+                                if let Some(i) = app.package_list_state.selected() {
+                                    if let Some(pkg) = app.packages.get_mut(i) {
+                                        pkg.1 = !pkg.1;
+                                    }
+                                }
+                            }
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
+                        Step::Complete => match key.code {
+                            KeyCode::Enter => {
+                                let _ = std::process::Command::new("systemctl")
+                                    .arg("reboot")
+                                    .spawn();
+                                app.should_quit = true;
+                            }
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
+                        // No input accepted while a live install is in
+                        // progress (aborting mid-partition/mid-format
+                        // could leave a disk in a worse state than
+                        // just letting it finish or fail on its own) —
+                        // except once it has actually failed, where
+                        // the alternative was leaving the user with no
+                        // way out at all short of killing the process.
+                        Step::Installing => {
+                            if app.install_failed {
+                                if let KeyCode::Char('q') = key.code {
+                                    app.should_quit = true;
+                                }
                             }
                         }
-                        KeyCode::Up if app.step == Step::DiskSelection => {
-                            let i = app.disk_list_state.selected().unwrap_or(0);
-                            if i > 0 {
-                                app.disk_list_state.select(Some(i - 1));
+                        Step::Welcome | Step::Review => match key.code {
+                            KeyCode::Enter => {
+                                if app.step == Step::Review {
+                                    app.next_step();
+                                    if !app.install_started {
+                                        app.install_started = true;
+                                        spawn_installer(
+                                            tx.clone(),
+                                            InstallConfig {
+                                                disk: app.disk.clone(),
+                                                hostname: app.hostname.clone(),
+                                                username: app.username.clone(),
+                                                timezone: app.timezone.clone(),
+                                                use_encryption: app.use_encryption,
+                                                keyboard_layout: app.keyboard_layout.clone(),
+                                                packages: app.packages.clone(),
+                                            },
+                                        );
+                                    }
+                                } else {
+                                    app.next_step();
+                                }
                             }
-                        }
-                        KeyCode::Char(' ') if app.step == Step::Encryption => {
-                            app.use_encryption = !app.use_encryption;
-                        }
-                        _ => {}
+                            KeyCode::Esc | KeyCode::Backspace => app.prev_step(),
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        },
                     }
                 }
             }
@@ -624,13 +1253,25 @@ fn render_ui(f: &mut Frame, app: &mut InstallerApp) {
         Step::Complete => render_complete(f, chunks[1]),
     }
 
-    // Footer
-    let footer_text = if app.step == Step::Complete {
-        " Press Enter to reboot  |  q to quit"
-    } else if app.step == Step::Installing {
-        " Installation in progress..."
-    } else {
-        " Enter: Next  |  Esc: Back  |  q: Quit"
+    // Footer — step-aware, since the controls genuinely differ per
+    // step (typing vs. Up/Down selection vs. toggling).
+    let footer_text = match app.step {
+        Step::Complete => " Enter: Reboot  |  q: Quit",
+        Step::Installing if app.install_failed => {
+            " Installation FAILED — see log above  |  q: Quit"
+        }
+        Step::Installing => " Installation in progress...",
+        Step::Keyboard | Step::Timezone => " Up/Down: Select  |  Enter: Next  |  Esc: Back",
+        Step::Network => {
+            " Type to edit hostname  |  Backspace: Delete  |  Enter: Next  |  Esc: Back"
+        }
+        Step::UserCreation => {
+            " Type to edit username  |  Backspace: Delete  |  Enter: Next  |  Esc: Back"
+        }
+        Step::Packages => " Up/Down: Select  |  Space: Toggle  |  Enter: Next  |  Esc: Back",
+        Step::Encryption => " Space: Toggle  |  Enter: Next  |  Esc: Back",
+        Step::DiskSelection => " Up/Down: Select  |  Enter: Next  |  Esc: Back",
+        _ => " Enter: Next  |  Esc: Back  |  q: Quit",
     };
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -640,7 +1281,7 @@ fn render_ui(f: &mut Frame, app: &mut InstallerApp) {
 
 fn render_welcome(f: &mut Frame, area: Rect) {
     let text = format!(
-        "{}\n\n    v{} \"Onyx\"\n    Built for the ones who mean it.\n\n\
+        "{}\n\n    v{} \"Diorite\"\n    Built for the ones who mean it.\n\n\
          \n    System Requirements:\n    \
          - CPU: x86_64 or ARM64\n    \
          - RAM: 2 GB minimum (8 GB recommended)\n    \
@@ -656,19 +1297,24 @@ fn render_welcome(f: &mut Frame, area: Rect) {
     f.render_widget(widget, area);
 }
 
-fn render_keyboard(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let text = format!(
-        "\n  Selected keyboard layout: {}\n\n  \
-         Common layouts: us, uk, de, fr, es, ru, jp\n\n  \
-         Press Enter to continue with '{}' layout",
-        app.keyboard_layout, app.keyboard_layout
-    );
-    let widget = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Keyboard Layout "),
-    );
-    f.render_widget(widget, area);
+fn render_keyboard(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
+    let items: Vec<ListItem> = KEYBOARD_LAYOUTS
+        .iter()
+        .map(|l| ListItem::new(format!("  {l}")))
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Keyboard Layout (Up/Down to select, Enter to confirm) "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, area, &mut app.keyboard_list_state);
 }
 
 fn render_disk_selection(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
@@ -710,28 +1356,37 @@ fn render_encryption(f: &mut Frame, app: &InstallerApp, area: Rect) {
     f.render_widget(widget, area);
 }
 
-fn render_timezone(f: &mut Frame, app: &InstallerApp, area: Rect) {
-    let text = format!(
-        "\n  Selected timezone: {}\n\n  \
-         Press Enter to continue",
-        app.timezone
-    );
-    let widget =
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Timezone "));
-    f.render_widget(widget, area);
+fn render_timezone(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
+    let items: Vec<ListItem> = TIMEZONES
+        .iter()
+        .map(|t| ListItem::new(format!("  {t}")))
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Timezone (Up/Down to select, Enter to confirm) "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, area, &mut app.timezone_list_state);
 }
 
 fn render_network(f: &mut Frame, app: &InstallerApp, area: Rect) {
+    // Trailing block cursor makes clear this is an active text field,
+    // not just a display of whatever the default will be — before
+    // this rewrote key handling, there was no way to change it at all.
     let text = format!(
-        "\n  Hostname: {}\n\n  \
+        "\n  Hostname: {}█\n\n  \
          Network: DHCP (automatic)\n  \
          DNS: 1.1.1.1, 1.0.0.1\n\n  \
-         Press Enter to continue",
-        if app.hostname.is_empty() {
-            "monolith"
-        } else {
-            &app.hostname
-        }
+         Type to edit, Backspace to delete, Enter to continue\n  \
+         (leave blank to use the default 'monolith')",
+        app.hostname
     );
     let widget = Paragraph::new(text).block(
         Block::default()
@@ -743,15 +1398,12 @@ fn render_network(f: &mut Frame, app: &InstallerApp, area: Rect) {
 
 fn render_user(f: &mut Frame, app: &InstallerApp, area: Rect) {
     let text = format!(
-        "\n  Username: {}\n\n  \
+        "\n  Username: {}█\n\n  \
          Root login: disabled (recommended)\n  \
          SSH: key-based authentication\n\n  \
-         Press Enter to continue",
-        if app.username.is_empty() {
-            "admin"
-        } else {
-            &app.username
-        }
+         Type to edit, Backspace to delete, Enter to continue\n  \
+         (leave blank to use the default 'admin')",
+        app.username
     );
     let widget = Paragraph::new(text).block(
         Block::default()
@@ -761,7 +1413,7 @@ fn render_user(f: &mut Frame, app: &InstallerApp, area: Rect) {
     f.render_widget(widget, area);
 }
 
-fn render_packages(f: &mut Frame, app: &InstallerApp, area: Rect) {
+fn render_packages(f: &mut Frame, app: &mut InstallerApp, area: Rect) {
     let items: Vec<ListItem> = app
         .packages
         .iter()
@@ -771,12 +1423,19 @@ fn render_packages(f: &mut Frame, app: &InstallerApp, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Additional Packages (Space to toggle) "),
-    );
-    f.render_widget(list, area);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Additional Packages (Up/Down to select, Space to toggle) "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, area, &mut app.package_list_state);
 }
 
 fn render_review(f: &mut Frame, app: &InstallerApp, area: Rect) {
@@ -876,7 +1535,7 @@ fn render_installing(f: &mut Frame, app: &InstallerApp, area: Rect) {
 fn render_complete(f: &mut Frame, area: Rect) {
     let text = format!(
         "{}\n\n    Installation complete!\n\n    \
-         Monolith OS v{} \"Onyx\" has been installed.\n\n    \
+         Monolith OS v{} \"Diorite\" has been installed.\n\n    \
          Remove installation media and press Enter to reboot.\n\n    \
          After reboot, connect via SSH on port 2222:\n    \
          ssh admin@<server-ip> -p 2222\n\n    \

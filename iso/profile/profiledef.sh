@@ -27,6 +27,16 @@ file_permissions=(
     ["/etc/shadow"]="0:0:400"
     ["/root"]="0:0:750"
     ["/root/.automated_script.sh"]="0:0:755"
-    ["/usr/local/bin/monolith-firstboot"]="0:0:755"
-    ["/usr/local/bin/monolith-installer"]="0:0:755"
+    # Trailing slash = mkarchiso chowns/chmods this recursively (see
+    # its own source: `[[ "${filename: -1}" == "/" ]]` gates -R).
+    # mkarchiso's own airootfs copy step does NOT preserve arbitrary
+    # custom permissions from the source tree — only what's listed
+    # here survives, confirmed by two scripts in a row (monolith-
+    # installer, then monolith-selftest) landing as non-executable
+    # 644 in the built image despite being 755 in git. Per-file
+    # entries meant remembering to add a new line every time a script
+    # is added to this directory — exactly what already got missed
+    # once. One recursive entry for the whole directory closes the
+    # bug class instead of the individual symptom.
+    ["/usr/local/bin/"]="0:0:755"
 )
